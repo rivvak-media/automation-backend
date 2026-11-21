@@ -1,0 +1,15 @@
+{
+  "name": "rivvak-automation-backend",
+  "version": "1.0.0",
+  "description": "Zero-dependency multi-tenant automation, PushPress Grow CRM migration, and unified inbox backend for Rivvak Media Growth OS.",
+  "type": "commonjs",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "private": true
+}
