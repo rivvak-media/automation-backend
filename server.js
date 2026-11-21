@@ -2441,6 +2441,23 @@ function createServer(options = {}) {
       const store = loadStore(storePath, env);
 
       // --- Public Routes ---
+      if (method === 'GET' && pathname === '/') {
+        sendJson(res, 200, {
+          ok: true,
+          service: 'rivvak-automation-backend',
+          version: '1.0.0',
+          status: 'online',
+          message: 'Rivvak Digital Automation Cloud Service is running.',
+          endpoints: {
+            health: '/api/health',
+            state: '/api/state',
+            adminClients: '/api/admin/clients'
+          },
+          timestamp: new Date().toISOString(),
+        });
+        return;
+      }
+
       if (method === 'GET' && pathname === '/api/health') {
         sendJson(res, 200, {
           ok: true,
