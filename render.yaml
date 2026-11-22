@@ -44,7 +44,37 @@ services:
         value: mail.privateemail.com
       - key: IMAP_PORT
         value: "993"
+      - key: IMAP_USER
+        sync: false
+      - key: IMAP_PASS
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: STRIPE_SECRET_KEY
+        sync: false
       - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: GA4_PROPERTY_ID
+        sync: false
+      - key: GA4_SERVICE_ACCOUNT_JSON
+        sync: false
+      - key: GOOGLE_ADS_DEVELOPER_TOKEN
+        sync: false
+      - key: GOOGLE_ADS_CLIENT_ID
+        sync: false
+      - key: GOOGLE_ADS_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_ADS_REFRESH_TOKEN
+        sync: false
+      - key: GOOGLE_ADS_CUSTOMER_ID
+        sync: false
+      - key: TIKTOK_ACCESS_TOKEN
+        sync: false
+      - key: TIKTOK_ADVERTISER_ID
+        sync: false
+      - key: GSC_SITE_URL
+        sync: false
+      - key: GOOGLE_SERVICE_ACCOUNT_JSON
         sync: false
       - key: TWILIO_ACCOUNT_SID
         sync: false

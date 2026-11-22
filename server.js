@@ -1493,6 +1493,184 @@ function isLiveEmailConfigured(env = process.env) {
   return Boolean(env.RESEND_API_KEY || isSmtpConfigured(env));
 }
 
+const INTEGRATION_CATALOG = [
+  {
+    id: 'neon-postgresql',
+    name: 'Neon PostgreSQL',
+    category: 'Core Platform',
+    keys: ['DATABASE_URL'],
+    unlocks: 'Persistent cloud store (rivvak_store) across deploys & restarts',
+  },
+  {
+    id: 'privateemail-smtp',
+    name: 'PrivateEmail SMTP',
+    category: 'Core Platform',
+    keys: ['SMTP_HOST', 'SMTP_USER', 'SMTP_PASS'],
+    unlocks: 'Instant lead alerts, 72-hour auto-reply receipts & client emails',
+  },
+  {
+    id: 'privateemail-imap',
+    name: 'PrivateEmail IMAP',
+    category: 'Core Platform',
+    keys: ['IMAP_HOST', 'IMAP_USER', 'IMAP_PASS'],
+    fallbacks: {
+      IMAP_HOST: 'SMTP_HOST',
+      IMAP_USER: 'SMTP_USER',
+      IMAP_PASS: 'SMTP_PASS',
+    },
+    unlocks: 'Read-only connect@rivvak.com inbox summary inside Partner Dashboard',
+  },
+  {
+    id: 'shopify-storefront-cors',
+    name: 'Shopify Storefront CORS',
+    category: 'Core Platform',
+    keys: ['ALLOWED_ORIGINS'],
+    unlocks: 'Authorized cross-origin browser requests from Shopify & rivvak.com',
+  },
+  {
+    id: 'google-analytics-4',
+    name: 'Google Analytics 4',
+    category: 'Analytics & Ads',
+    keys: ['GA4_PROPERTY_ID', 'GA4_SERVICE_ACCOUNT_JSON'],
+    unlocks: 'Overview Column 1: Engaged Sessions, Engagement Rate, Sessions & Total Users',
+  },
+  {
+    id: 'google-ads',
+    name: 'Google Ads',
+    category: 'Analytics & Ads',
+    keys: [
+      'GOOGLE_ADS_DEVELOPER_TOKEN',
+      'GOOGLE_ADS_CLIENT_ID',
+      'GOOGLE_ADS_CLIENT_SECRET',
+      'GOOGLE_ADS_REFRESH_TOKEN',
+      'GOOGLE_ADS_CUSTOMER_ID',
+    ],
+    unlocks: 'Overview Column 2: Ad Clicks, Spend/MRR, Conversions & Top Campaigns',
+  },
+  {
+    id: 'meta-facebook-instagram',
+    name: 'Meta / Facebook & Instagram',
+    category: 'Analytics & Ads',
+    keys: ['META_ACCESS_TOKEN', 'META_AD_ACCOUNT_ID', 'META_IG_USER_ID', 'META_VERIFY_TOKEN'],
+    unlocks: 'Overview Column 3: Followers, Engagement, Impressions, IG DMs & Meta Ads',
+  },
+  {
+    id: 'tiktok-business',
+    name: 'TikTok Business',
+    category: 'Analytics & Ads',
+    keys: ['TIKTOK_ACCESS_TOKEN', 'TIKTOK_ADVERTISER_ID'],
+    unlocks: 'Short-form Reels & TikTok ad attribution metrics',
+  },
+  {
+    id: 'google-search-console-gbp',
+    name: 'Google Search Console & GBP',
+    category: 'Analytics & Ads',
+    keys: ['GSC_SITE_URL', 'GOOGLE_SERVICE_ACCOUNT_JSON'],
+    unlocks: 'Organic search impressions, Map-Pack visibility & Google Business reviews',
+  },
+  {
+    id: 'stripe-billing-webhooks',
+    name: 'Stripe Billing & Webhooks',
+    category: 'Billing, SMS & Automation',
+    keys: ['STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET'],
+    unlocks: 'Verified retainer billing, checkout status & automated invoice ledger',
+  },
+  {
+    id: 'twilio-sms',
+    name: 'Twilio SMS',
+    category: 'Billing, SMS & Automation',
+    keys: ['TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_FROM_NUMBER'],
+    unlocks: 'Live 2-way SMS inbox, missed-call text-back & booking reminders',
+  },
+  {
+    id: 'resend-email',
+    name: 'Resend Email',
+    category: 'Billing, SMS & Automation',
+    keys: ['RESEND_API_KEY', 'RESEND_FROM'],
+    unlocks: 'High-deliverability HTTP transactional email dispatch',
+  },
+  {
+    id: 'webhook-bridge',
+    name: 'Make / n8n Webhook Bridge',
+    category: 'Billing, SMS & Automation',
+    keys: ['WEBHOOK_URL'],
+    unlocks: 'Outbound workflow forwarding to Make.com, n8n, or Zapier',
+  },
+];
+
+/**
+ * Inspect configured integration status using env booleans ONLY (never exposing raw secret values).
+ * @param {object} env
+ * @returns {{ ok: boolean, summary: { connected: number, missing: number, total: number }, integrations: Array<object>, timestamp: string }}
+ */
+function buildIntegrationsStatus(env = process.env) {
+  const hasEnv = (key) => {
+    if (!env || !(key in env)) return false;
+    const val = env[key];
+    return typeof val === 'string' ? val.trim().length > 0 : Boolean(val);
+  };
+
+  let connectedCount = 0;
+  const integrations = INTEGRATION_CATALOG.map((item) => {
+    const envFlags = {};
+    const envVars = [];
+    const presentKeys = [];
+    const missingKeys = [];
+    let usedFallback = false;
+
+    for (const key of item.keys) {
+      const direct = hasEnv(key);
+      const fallbackKey = item.fallbacks && item.fallbacks[key];
+      const viaFallback = !direct && Boolean(fallbackKey && hasEnv(fallbackKey));
+      const configured = direct || viaFallback;
+      if (viaFallback) usedFallback = true;
+      envFlags[key] = configured;
+      const entry = { key, configured };
+      if (viaFallback) entry.fallbackFrom = fallbackKey;
+      envVars.push(entry);
+      if (configured) {
+        presentKeys.push(key);
+      } else {
+        missingKeys.push(key);
+      }
+    }
+
+    const connected = missingKeys.length === 0;
+    if (connected) connectedCount++;
+
+    const out = {
+      id: item.id,
+      name: item.name,
+      category: item.category,
+      connected,
+      status: connected ? 'connected' : 'missing',
+      partial: !connected && presentKeys.length > 0,
+      requiredKeys: item.keys.slice(),
+      presentKeys,
+      missingKeys,
+      env: envFlags,
+      envVars,
+      unlocks: item.unlocks,
+    };
+    if (usedFallback) {
+      out.note = 'Active using SMTP_HOST / SMTP_USER / SMTP_PASS fallback credentials';
+    }
+    return out;
+  });
+
+  const total = integrations.length;
+  return {
+    ok: true,
+    summary: {
+      connected: connectedCount,
+      missing: total - connectedCount,
+      total,
+    },
+    integrations,
+    timestamp: new Date().toISOString(),
+  };
+}
+
 /**
  * Render the dark-obsidian Rivvak Media status HTML dashboard for GET /.
  */
@@ -3737,7 +3915,7 @@ function createServer(options = {}) {
   const fetchImpl = options.fetchImpl || globalThis.fetch;
   const smtpSendImpl = options.smtpSendImpl || sendSmtpEmail;
   const storePath = resolveStorePath(options);
-  const adminPasscode = options.adminPasscode || env.ADMIN_PASSCODE || 'RIVVAK-2026';
+  const adminPasscode = options.adminPasscode || env.ADMIN_PASSCODE || 'Jh22mp21??.';
   const metaVerifyToken = options.metaVerifyToken || env.META_VERIFY_TOKEN || 'rivvak-meta-verify-2026';
   const serverStartedAtMs = Date.now();
   const leadRateWindowMs = Number(options.leadRateWindowMs || LEAD_RATE_WINDOW_MS);
@@ -3834,10 +4012,12 @@ function createServer(options = {}) {
           endpoints: {
             health: '/api/health',
             publicLead: '/api/public/lead',
+            adminVerifyPasscode: '/api/admin/verify-passcode',
             state: '/api/state',
             adminClients: '/api/admin/clients',
             adminLeads: '/api/admin/leads',
             adminEmailInbox: '/api/admin/email-inbox',
+            adminIntegrations: '/api/admin/integrations',
             adminBackup: '/api/admin/backup',
             adminRestore: '/api/admin/restore',
             stripeWebhook: '/webhooks/stripe',
@@ -3873,6 +4053,27 @@ function createServer(options = {}) {
           uptimeSeconds: Math.max(0, Math.floor((Date.now() - serverStartedAtMs) / 1000)),
           timestamp: new Date().toISOString(),
         });
+        return;
+      }
+
+      // Admin Passcode Verification (POST /api/admin/verify-passcode, CORS-enabled)
+      if (method === 'POST' && pathname === '/api/admin/verify-passcode') {
+        const { data } = await readRequestBody(req);
+        const authHeader = String(req.headers.authorization || '');
+        const bearerMatch = authHeader.match(/^Bearer\s+(.+)$/i);
+        const bearerToken = bearerMatch ? bearerMatch[1].trim() : '';
+        const hasBodyPasscode =
+          data &&
+          typeof data === 'object' &&
+          data.passcode !== undefined &&
+          data.passcode !== null &&
+          String(data.passcode).trim() !== '';
+        const candidate = hasBodyPasscode ? String(data.passcode).trim() : bearerToken;
+        if (safeEqualToken(candidate, adminPasscode)) {
+          sendJson(res, 200, { ok: true });
+        } else {
+          sendJson(res, 401, { ok: false, error: 'Invalid passcode' });
+        }
         return;
       }
 
@@ -4561,6 +4762,12 @@ function createServer(options = {}) {
           return;
         }
 
+        if (method === 'GET' && pathname === '/api/admin/integrations') {
+          const report = buildIntegrationsStatus(env);
+          sendJson(res, 200, report);
+          return;
+        }
+
         if (method === 'GET' && pathname === '/api/admin/backup') {
           const backupJson = JSON.stringify(store, null, 2);
           res.writeHead(200, {
@@ -4934,6 +5141,7 @@ module.exports = {
   fetchImapInboxSummary,
   verifyStripeSignature,
   safeEqualToken,
+  buildIntegrationsStatus,
   loadDotEnv,
   parseDotEnvFile,
   executeNeonSql,

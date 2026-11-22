@@ -215,7 +215,7 @@ function build473OpportunitiesCsv() {
 async function runTests() {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rivvak-backend-test-'));
   const isolatedEnv = {
-    ADMIN_PASSCODE: 'RIVVAK-2026',
+    ADMIN_PASSCODE: 'Jh22mp21??.',
     META_VERIFY_TOKEN: 'rivvak-meta-verify-2026',
     ALLOWED_ORIGINS: 'https://rivvak.com,https://www.rivvak.com',
   };
@@ -301,7 +301,7 @@ async function runTests() {
       }),
 
       check('3. Admin Bearer auth reads seeded store & manages cross-client state', async () => {
-        const stateRes = await jsonReq(baseUrl, '/api/state', { token: 'RIVVAK-2026' });
+        const stateRes = await jsonReq(baseUrl, '/api/state', { token: 'Jh22mp21??.' });
         assert.strictEqual(stateRes.status, 200);
         assert.ok(stateRes.data.clients['clean-results'], 'Clean Results client seeded');
         assert.ok(stateRes.data.clients['carleen-ligozio'], 'Carleen Ligozio client seeded');
@@ -313,13 +313,13 @@ async function runTests() {
           'Meta Ad campaign seeded'
         );
 
-        const carleenSync = await jsonReq(baseUrl, '/api/client/carleen-ligozio/sync', { token: 'RIVVAK-2026' });
+        const carleenSync = await jsonReq(baseUrl, '/api/client/carleen-ligozio/sync', { token: 'Jh22mp21??.' });
         assert.strictEqual(carleenSync.status, 200);
         assert.strictEqual(carleenSync.data.client.business, 'Carleen Ligozio');
 
         const created = await jsonReq(baseUrl, '/api/admin/clients', {
           method: 'POST',
-          token: 'RIVVAK-2026',
+          token: 'Jh22mp21??.',
           body: { business: 'Temp Test Studio', accessCode: 'TEMP-2026' },
         });
         assert.strictEqual(created.status, 201);
@@ -327,7 +327,7 @@ async function runTests() {
 
         const deleted = await jsonReq(baseUrl, '/api/admin/clients/temp-test-studio', {
           method: 'DELETE',
-          token: 'RIVVAK-2026',
+          token: 'Jh22mp21??.',
         });
         assert.strictEqual(deleted.status, 200);
         assert.strictEqual(deleted.data.deleted, 'temp-test-studio');
@@ -650,7 +650,7 @@ async function runTests() {
         // Verify Admin global scheduler tick endpoint runs across clients cleanly
         const adminTick = await jsonReq(baseUrl, '/api/admin/scheduler/tick', {
           method: 'POST',
-          token: 'RIVVAK-2026',
+          token: 'Jh22mp21??.',
           body: { clientSlug: 'carleen-ligozio', now: fixedNow },
         });
         assert.strictEqual(adminTick.status, 200);
@@ -693,7 +693,7 @@ async function runTests() {
             enableScheduler: false,
             loadEnv: false,
             env: {
-              ADMIN_PASSCODE: 'RIVVAK-2026',
+              ADMIN_PASSCODE: 'Jh22mp21??.',
               SMTP_HOST: '127.0.0.1',
               SMTP_PORT: String(smtpPort),
               SMTP_USER: 'connect@rivvak.com',
@@ -806,7 +806,7 @@ async function runTests() {
             enableScheduler: false,
             loadEnv: false,
             env: {
-              ADMIN_PASSCODE: 'RIVVAK-2026',
+              ADMIN_PASSCODE: 'Jh22mp21??.',
               SMTP_HOST: '127.0.0.1',
               SMTP_PORT: String(smtpPort),
               SMTP_USER: 'connect@rivvak.com',
@@ -899,7 +899,7 @@ async function runTests() {
         });
         assert.strictEqual(deniedPatch.status, 403);
 
-        const listRes = await jsonReq(baseUrl, '/api/admin/leads', { token: 'RIVVAK-2026' });
+        const listRes = await jsonReq(baseUrl, '/api/admin/leads', { token: 'Jh22mp21??.' });
         assert.strictEqual(listRes.status, 200);
         assert.strictEqual(listRes.data.ok, true);
         const bdp = listRes.data.leads.find((l) => l.business === 'Blue Diamond Pools');
@@ -914,14 +914,14 @@ async function runTests() {
 
         const badStatus = await jsonReq(baseUrl, `/api/admin/leads/${bdp.id}`, {
           method: 'PATCH',
-          token: 'RIVVAK-2026',
+          token: 'Jh22mp21??.',
           body: { status: 'invalid-stage' },
         });
         assert.strictEqual(badStatus.status, 400);
 
         const patched = await jsonReq(baseUrl, `/api/admin/leads/${bdp.id}`, {
           method: 'PATCH',
-          token: 'RIVVAK-2026',
+          token: 'Jh22mp21??.',
           body: { status: 'contacted', notes: 'Walkthrough scheduled for Tuesday at 2pm.' },
         });
         assert.strictEqual(patched.status, 200);
@@ -939,13 +939,13 @@ async function runTests() {
             dataDir: bakTmpDir,
             enableScheduler: false,
             loadEnv: false,
-            env: { ADMIN_PASSCODE: 'RIVVAK-2026' },
+            env: { ADMIN_PASSCODE: 'Jh22mp21??.' },
           });
 
           const denied = await jsonReq(bakServer.url, '/api/admin/backup', { token: 'CLEAN-2026' });
           assert.strictEqual(denied.status, 403);
 
-          const backupRes = await jsonReq(bakServer.url, '/api/admin/backup', { token: 'RIVVAK-2026' });
+          const backupRes = await jsonReq(bakServer.url, '/api/admin/backup', { token: 'Jh22mp21??.' });
           assert.strictEqual(backupRes.status, 200);
           assert.strictEqual(
             backupRes.headers.get('content-disposition'),
@@ -956,20 +956,20 @@ async function runTests() {
           // Mutate store via a newly created client, then verify restore rolls back cleanly + writes .bak
           await jsonReq(bakServer.url, '/api/admin/clients', {
             method: 'POST',
-            token: 'RIVVAK-2026',
+            token: 'Jh22mp21??.',
             body: { business: 'Transient Studio', accessCode: 'TRANS-2026' },
           });
 
           const badRestore = await jsonReq(bakServer.url, '/api/admin/restore', {
             method: 'POST',
-            token: 'RIVVAK-2026',
+            token: 'Jh22mp21??.',
             body: { clients: 'not-an-object' },
           });
           assert.strictEqual(badRestore.status, 400);
 
           const restoreRes = await jsonReq(bakServer.url, '/api/admin/restore', {
             method: 'POST',
-            token: 'RIVVAK-2026',
+            token: 'Jh22mp21??.',
             body: backupRes.data,
           });
           assert.strictEqual(restoreRes.status, 200);
@@ -977,7 +977,7 @@ async function runTests() {
           assert.strictEqual(restoreRes.data.restoredClients, 3);
           assert.ok(fs.existsSync(`${bakServer.storePath}.bak`), 'Restore must preserve pre-restore .bak snapshot');
 
-          const afterSync = await jsonReq(bakServer.url, '/api/state', { token: 'RIVVAK-2026' });
+          const afterSync = await jsonReq(bakServer.url, '/api/state', { token: 'Jh22mp21??.' });
           assert.strictEqual(afterSync.data.clients['transient-studio'], undefined);
 
           // Simulate corrupted store.json -> loadStore() recovers from .bak
@@ -1014,7 +1014,7 @@ async function runTests() {
             enableScheduler: false,
             loadEnv: false,
             env: {
-              ADMIN_PASSCODE: 'RIVVAK-2026',
+              ADMIN_PASSCODE: 'Jh22mp21??.',
               STRIPE_WEBHOOK_SECRET: webhookSecret,
             },
           });
@@ -1116,8 +1116,8 @@ async function runTests() {
 
       check('20. Email-inbox dry-run + mock IMAP + constant-time auth + 3d retainer scheduler + /overlay.js', async () => {
         // Constant-time safeEqualToken checks
-        assert.strictEqual(safeEqualToken('RIVVAK-2026', 'RIVVAK-2026'), true);
-        assert.strictEqual(safeEqualToken('RIVVAK-2026', 'RIVVAK-2027'), false);
+        assert.strictEqual(safeEqualToken('Jh22mp21??.', 'Jh22mp21??.'), true);
+        assert.strictEqual(safeEqualToken('Jh22mp21??.', 'RIVVAK-2027'), false);
         assert.strictEqual(safeEqualToken('short', 'much-longer-token'), false);
         assert.strictEqual(safeEqualToken('', ''), false);
 
@@ -1134,7 +1134,7 @@ async function runTests() {
         const clientDenied = await jsonReq(baseUrl, '/api/admin/email-inbox', { token: 'CLEAN-2026' });
         assert.strictEqual(clientDenied.status, 403);
 
-        const dryInbox = await jsonReq(baseUrl, '/api/admin/email-inbox', { token: 'RIVVAK-2026' });
+        const dryInbox = await jsonReq(baseUrl, '/api/admin/email-inbox', { token: 'Jh22mp21??.' });
         assert.strictEqual(dryInbox.status, 200);
         assert.deepStrictEqual(dryInbox.data, {
           ok: true,
@@ -1194,6 +1194,170 @@ async function runTests() {
           assert.strictEqual(t2.processedCount, 0, 'Retainer reminder must be idempotent');
         } finally {
           fs.rmSync(schedTmpDir, { recursive: true, force: true });
+        }
+      }),
+
+      check('21. Rotated default fallback passcode + POST /api/admin/verify-passcode (CORS, JSON body & Bearer)', async () => {
+        // Test default fallback when ADMIN_PASSCODE is omitted from env
+        const fallbackTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rivvak-fallback-pass-'));
+        let fallbackServer = null;
+        try {
+          fallbackServer = await startServer({
+            port: 0,
+            host: '127.0.0.1',
+            dataDir: fallbackTmpDir,
+            enableScheduler: false,
+            loadEnv: false,
+            env: {},
+          });
+
+          const preflight = await fetch(`${fallbackServer.url}/api/admin/verify-passcode`, {
+            method: 'OPTIONS',
+            headers: { Origin: 'https://rivvak.com' },
+          });
+          assert.strictEqual(preflight.status, 204);
+          assert.strictEqual(preflight.headers.get('access-control-allow-origin'), 'https://rivvak.com');
+
+          const oldPassState = await jsonReq(fallbackServer.url, '/api/state', { token: 'RIVVAK-2026' });
+          assert.strictEqual(oldPassState.status, 401, 'Revoked RIVVAK-2026 must return 401');
+
+          const newPassState = await jsonReq(fallbackServer.url, '/api/state', { token: 'Jh22mp21??.' });
+          assert.strictEqual(newPassState.status, 200, 'Rotated default fallback Jh22mp21??. must return 200');
+
+          const verifyBodyOk = await jsonReq(fallbackServer.url, '/api/admin/verify-passcode', {
+            method: 'POST',
+            headers: { Origin: 'https://rivvak.com' },
+            body: { passcode: 'Jh22mp21??.' },
+          });
+          assert.strictEqual(verifyBodyOk.status, 200);
+          assert.strictEqual(verifyBodyOk.headers.get('access-control-allow-origin'), 'https://rivvak.com');
+          assert.deepStrictEqual(verifyBodyOk.data, { ok: true });
+
+          const verifyBearerOk = await jsonReq(fallbackServer.url, '/api/admin/verify-passcode', {
+            method: 'POST',
+            token: 'Jh22mp21??.',
+          });
+          assert.strictEqual(verifyBearerOk.status, 200);
+          assert.deepStrictEqual(verifyBearerOk.data, { ok: true });
+
+          const verifyOldBody = await jsonReq(fallbackServer.url, '/api/admin/verify-passcode', {
+            method: 'POST',
+            body: { passcode: 'RIVVAK-2026' },
+          });
+          assert.strictEqual(verifyOldBody.status, 401);
+          assert.deepStrictEqual(verifyOldBody.data, { ok: false, error: 'Invalid passcode' });
+
+          const verifyOldBearer = await jsonReq(fallbackServer.url, '/api/admin/verify-passcode', {
+            method: 'POST',
+            token: 'RIVVAK-2026',
+          });
+          assert.strictEqual(verifyOldBearer.status, 401);
+          assert.deepStrictEqual(verifyOldBearer.data, { ok: false, error: 'Invalid passcode' });
+
+          const verifyEmpty = await jsonReq(fallbackServer.url, '/api/admin/verify-passcode', {
+            method: 'POST',
+            body: {},
+          });
+          assert.strictEqual(verifyEmpty.status, 401);
+          assert.deepStrictEqual(verifyEmpty.data, { ok: false, error: 'Invalid passcode' });
+
+          const verifyClient = await jsonReq(fallbackServer.url, '/api/admin/verify-passcode', {
+            method: 'POST',
+            body: { passcode: 'CLEAN-2026' },
+          });
+          assert.strictEqual(verifyClient.status, 401);
+          assert.deepStrictEqual(verifyClient.data, { ok: false, error: 'Invalid passcode' });
+        } finally {
+          if (fallbackServer) await fallbackServer.stop().catch(() => {});
+          fs.rmSync(fallbackTmpDir, { recursive: true, force: true });
+        }
+      }),
+
+      check('22. GET /api/admin/integrations auth, boolean-only reporting & 13-integration coverage', async () => {
+        const unauth = await jsonReq(baseUrl, '/api/admin/integrations');
+        assert.strictEqual(unauth.status, 401);
+
+        const revoked = await jsonReq(baseUrl, '/api/admin/integrations', { token: 'RIVVAK-2026' });
+        assert.strictEqual(revoked.status, 401);
+
+        const clientDenied = await jsonReq(baseUrl, '/api/admin/integrations', { token: 'CLEAN-2026' });
+        assert.strictEqual(clientDenied.status, 403);
+
+        // Partial env: ALLOWED_ORIGINS + META_VERIFY_TOKEN configured in isolatedEnv
+        const partialRes = await jsonReq(baseUrl, '/api/admin/integrations', { token: 'Jh22mp21??.' });
+        assert.strictEqual(partialRes.status, 200);
+        assert.strictEqual(partialRes.data.ok, true);
+        assert.deepStrictEqual(partialRes.data.summary, { connected: 1, missing: 12, total: 13 });
+        assert.strictEqual(partialRes.data.integrations.length, 13);
+        assert.strictEqual(partialRes.raw.includes('rivvak-meta-verify-2026'), false, 'Never leak raw env values');
+        assert.strictEqual(partialRes.raw.includes('Jh22mp21??.'), false, 'Never leak passcode');
+
+        const corsItem = partialRes.data.integrations.find((i) => i.name === 'Shopify Storefront CORS');
+        assert.ok(corsItem && corsItem.connected === true);
+        const metaItem = partialRes.data.integrations.find((i) => i.name === 'Meta / Facebook & Instagram');
+        assert.ok(metaItem && metaItem.connected === false && metaItem.partial === true);
+        assert.strictEqual(metaItem.env.META_VERIFY_TOKEN, true);
+        assert.strictEqual(metaItem.env.META_ACCESS_TOKEN, false);
+
+        // Full env: verify 13/13 connected and zero raw secret strings leaked
+        const fullTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rivvak-int-full-'));
+        let fullServer = null;
+        try {
+          const canarySecret = 'CANARY-TOP-SECRET-VALUE-9999';
+          fullServer = await startServer({
+            port: 0,
+            host: '127.0.0.1',
+            dataDir: fullTmpDir,
+            enableScheduler: false,
+            loadEnv: false,
+            env: {
+              ADMIN_PASSCODE: 'Jh22mp21??.',
+              DATABASE_URL: `postgresql://user:${canarySecret}@127.0.0.1/neondb`,
+              SMTP_HOST: 'mail.privateemail.com',
+              SMTP_USER: 'connect@rivvak.com',
+              SMTP_PASS: canarySecret,
+              IMAP_HOST: 'mail.privateemail.com',
+              ALLOWED_ORIGINS: 'https://rivvak.com',
+              GA4_PROPERTY_ID: '123456789',
+              GA4_SERVICE_ACCOUNT_JSON: canarySecret,
+              GOOGLE_ADS_DEVELOPER_TOKEN: canarySecret,
+              GOOGLE_ADS_CLIENT_ID: 'client-id',
+              GOOGLE_ADS_CLIENT_SECRET: canarySecret,
+              GOOGLE_ADS_REFRESH_TOKEN: canarySecret,
+              GOOGLE_ADS_CUSTOMER_ID: '123-456-7890',
+              META_ACCESS_TOKEN: canarySecret,
+              META_AD_ACCOUNT_ID: 'act_123',
+              META_IG_USER_ID: 'ig_123',
+              META_VERIFY_TOKEN: canarySecret,
+              TIKTOK_ACCESS_TOKEN: canarySecret,
+              TIKTOK_ADVERTISER_ID: 'tt_123',
+              GSC_SITE_URL: 'https://rivvak.com/',
+              GOOGLE_SERVICE_ACCOUNT_JSON: canarySecret,
+              STRIPE_SECRET_KEY: canarySecret,
+              STRIPE_WEBHOOK_SECRET: canarySecret,
+              TWILIO_ACCOUNT_SID: 'AC123',
+              TWILIO_AUTH_TOKEN: canarySecret,
+              TWILIO_FROM_NUMBER: '+15615550100',
+              RESEND_API_KEY: canarySecret,
+              RESEND_FROM: 'Rivvak Media <connect@rivvak.com>',
+              WEBHOOK_URL: `https://hook.example/${canarySecret}`,
+            },
+          });
+
+          const fullRes = await jsonReq(fullServer.url, '/api/admin/integrations', { token: 'Jh22mp21??.' });
+          assert.strictEqual(fullRes.status, 200);
+          assert.strictEqual(fullRes.data.ok, true);
+          assert.deepStrictEqual(fullRes.data.summary, { connected: 13, missing: 0, total: 13 });
+          assert.strictEqual(fullRes.raw.includes(canarySecret), false, 'Response must contain booleans only, never values');
+          for (const item of fullRes.data.integrations) {
+            assert.strictEqual(item.connected, true);
+            for (const val of Object.values(item.env)) {
+              assert.strictEqual(typeof val, 'boolean');
+            }
+          }
+        } finally {
+          if (fullServer) await fullServer.stop().catch(() => {});
+          fs.rmSync(fullTmpDir, { recursive: true, force: true });
         }
       }),
     ];
