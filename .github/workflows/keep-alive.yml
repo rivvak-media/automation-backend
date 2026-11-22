@@ -1,0 +1,16 @@
+name: Render Keep-Alive & Health Monitor
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+jobs:
+  health-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Rivvak Automation Backend /api/health
+        run: |
+          BODY=$(curl -fsS --max-time 60 https://automation-backend-hgt3.onrender.com/api/health)
+          echo "$BODY"
+          echo "$BODY" | grep -q '"ok":true'
