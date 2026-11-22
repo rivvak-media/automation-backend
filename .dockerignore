@@ -1,0 +1,14 @@
+.env
+.env.*
+!.env.example
+.git
+.gitignore
+data
+node_modules
+*.log
+*.bak
+*.tmp
+test.js
+README.md
+Dockerfile
+render.yaml

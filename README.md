@@ -1,6 +1,6 @@
-# Rivvak Media — Zero-Dependency Automation Backend
+# Rivvak Media — Cloud Automation Engine (v2.0.0)
 
-Zero-dependency Node.js (`>= 18`) backend powering multi-tenant client portals, PushPress Grow CSV migration, unified inbox webhooks, channel dispatchers, and the 24/7 workflow scheduler for **Rivvak Media Growth OS**.
+Zero-dependency Node.js (`>= 18`) backend powering public website lead intake, multi-tenant client portals, PushPress Grow CSV migration, native TLS SMTP/IMAP email workflows, Stripe billing webhooks, and the 24/7 automation scheduler for **Rivvak Media Growth OS**.
 
 Uses **only built-in Node.js modules** (`http`, `fs`, `path`, `crypto`, `url`, `querystring`, `tls`, `net`) and native global `fetch`. Zero `npm install` packages required.
 
@@ -14,111 +14,97 @@ cp .env.example .env
 npm start
 ```
 
-Run the self-contained verification suite (ephemeral port `0`, temporary store cleanup):
+Run the self-contained 20-test verification suite (ephemeral port `0`, isolated temp directories):
 
 ```bash
 npm test
 ```
 
-Default server URL: `http://127.0.0.1:8787` (health check at `GET /api/health`).
+Default local server URL: `http://127.0.0.1:8787`
+- Browser visit (`Accept: text/html`) at `GET /` serves the dark-obsidian (`#09090B`) **Rivvak Media — Cloud Automation Engine** status dashboard.
+- API / curl visit at `GET /` (or `GET /?format=json`) returns service telemetry JSON (`version: "2.0.0"`).
+- Health probe at `GET /api/health`.
 
 ---
 
 ## Multi-Tenant Authentication & Isolation
 
-All `/api/*` endpoints (except `GET /api/health`) require `Authorization: Bearer <token>`:
+All `/api/state`, `/api/admin/*`, and `/api/client/*` routes require `Authorization: Bearer <token>` verified via constant-time `safeEqualToken(a, b)` (`crypto.timingSafeEqual` over SHA-256 digests):
 
-| Token Type | Default Value | Access Scope |
+| Token Type | Configuration | Access Scope |
 |---|---|---|
-| **Admin Passcode** (`ADMIN_PASSCODE`) | `RIVVAK-2026` | Full access to `GET/PUT /api/state`, `/api/admin/*`, and any `/api/client/:slug/*` |
-| **Client Access Code** (`client.accessCode`) | `CLEAN-2026` / `CARLEEN-2026` | Restricted strictly to matching `/api/client/:slug/*`. Returns `403 Forbidden` on `/api/state`, `/api/admin/*`, or any other client slug |
+| **Admin Passcode** (`ADMIN_PASSCODE`) | Set in `.env` / Render env | Full access to `GET/PUT /api/state`, `/api/admin/*`, and any `/api/client/:slug/*` |
+| **Client Access Code** (`client.accessCode`) | Per-tenant in `store.json` | Restricted strictly to matching `/api/client/:slug/*`. Returns `403 Forbidden` on `/api/state`, `/api/admin/*`, or any other client slug |
 | **Missing / Invalid Token** | — | Returns `401 Unauthorized` |
 
-### Allowed CORS Origins
-- `https://rivvak.com`
-- `https://www.rivvak.com`
-- `http://localhost:*`
-- `http://127.0.0.1:*`
-- Plus any extra origins listed in `ALLOWED_ORIGINS`.
+### Security & Reliability Controls
+- Baseline HTTP security headers (`X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`, `X-Frame-Options: DENY`) on root and API responses.
+- Strict CORS allowlist: `https://rivvak.com`, `https://www.rivvak.com`, `http://localhost:*`, `http://127.0.0.1:*`, plus `ALLOWED_ORIGINS`.
+- Atomic `saveStore()` (`.tmp` + `fs.renameSync`) with automatic `.bak` snapshot and automatic `.bak` recovery in `loadStore()`.
+- Graceful `SIGINT` / `SIGTERM` shutdown with idle socket cleanup.
 
 ---
 
-## Seeded Clients (`data/store.json`)
+## Seeded Data (`data/store.json`)
 
 On first boot, `data/store.json` is automatically initialized with:
-1. **`clean-results`** (`accessCode: CLEAN-2026`): Clean Results — House of Fitness (Bobby, West Palm Beach FL), Meta Ads campaign `CleanResults_ "Body by Bobby!"`, all 7 gym automation workflows, sample multi-channel inbox threads, upcoming bookings, starter contacts, pipeline opportunities, and Marketing Studio templates.
-2. **`carleen-ligozio`** (`accessCode: CARLEEN-2026`): Carleen Ligozio (West Palm Beach FL & Southampton NY), luxury apparel Brand Board, and GBP cleanup / website launch workflows.
+1. **`clean-results`**: Clean Results — House of Fitness (Bobby, West Palm Beach FL), Meta Ads campaign `CleanResults_ "Body by Bobby!"`, all 7 gym automation workflows, sample multi-channel inbox threads, upcoming bookings, starter contacts, pipeline opportunities, and Marketing Studio templates.
+2. **`carleen-ligozio`**: Carleen Ligozio (West Palm Beach FL & Southampton NY), luxury apparel Brand Board, and GBP cleanup / website launch workflows.
+3. **`publicLeads` seed**: Blue Diamond Pools (`Jaime`, `https://bluediamondpools.com/`, `(954) 755-0777`, `info@bluediamondpools.com`, Broward & Palm Beach County, `status: "qualified"`, `source: "Google Doc — Jaime Pool Company"`).
 
 ---
 
 ## API Reference
 
-### Health & State Sync
-- `GET /api/health` — Public service status check.
-- `GET /api/state` / `PUT /api/state` — Admin full multi-tenant store read/write.
+### Status & Public Intake
+- `GET /` — Dark-obsidian HTML dashboard (when `Accept: text/html` and `format !== "json"`) or JSON telemetry (`version: "2.0.0"`).
+- `GET /api/health` — Public health check (`{ ok, service, brand: "Rivvak Media", version: "2.0.0", clients, publicLeads, smtpConfigured, uptimeSeconds, timestamp }`).
+- `GET /overlay.js` & `GET /api/client/carleen-ligozio/overlay.js` — Serves `carleen-overlay.js` (`application/javascript; charset=utf-8`).
+- `POST /api/public/lead` — Public website & chat concierge intake:
+  - Per-IP sliding-window rate limiter (`10 req / 10 min` -> `429 Too Many Requests`).
+  - Honeypot `_hp` check (non-empty silently returns `200 { ok: true, ignored: true }`).
+  - Validates and caps lengths for `{ name, business, email, phone, industry, scope, estimatedSetup, estimatedMonthly, message, source, pageUrl, ticketId }`.
+  - Prepends into `store.publicLeads` (capped at `500`, newest first).
+  - Dispatches alert email to `store.settings.agencyEmail || "connect@rivvak.com"` via Resend or Native TLS SMTP (or records `dry_run_queued`), plus optional branded 72-hour staging preview receipt from `"Rivvak Media <connect@rivvak.com>"` when `AUTO_REPLY_LEADS !== "false"`.
+  - Returns `201 { ok: true, leadId, ticketId, emailDispatched, mode }`.
+
+### Admin CRM, Inbox & Backup Routes (Admin Bearer Auth Only)
+- `GET /api/state` / `PUT /api/state` — Full multi-tenant store read/write.
+- `GET/POST /api/admin/clients`, `PUT/DELETE /api/admin/clients/:slug` — Client portal lifecycle.
+- `GET /api/admin/leads` — List captured public leads (optional `?status=` filter).
+- `PATCH /api/admin/leads/:id` — Update lead `status` (`new`, `contacted`, `qualified`, `won`, `archived`) and `notes`.
+- `GET /api/admin/email-inbox` — Read-only native TLS IMAP header summary (`uid`, `date`, `from`, `subject`, `seen`) from `INBOX` (`8000ms` timeout, default `limit=12`), or honest `{ ok: true, mode: "dry_run_unconfigured", messages: [] }` when IMAP/SMTP credentials are omitted.
+- `GET /api/admin/backup` — Downloads `store.json` with `Content-Disposition: attachment; filename="rivvak-store-backup.json"`.
+- `POST /api/admin/restore` — Validates `clients` object, saves `.bak` of prior store, and atomically replaces `store.json`.
+- `POST /api/admin/scheduler/tick` — Manual global or per-client scheduler execution.
+
+### Client Portal Routes (`/api/client/:slug/*`)
 - `GET /api/client/:slug/sync` / `PUT /api/client/:slug` — Client-scoped state pull/push.
-- `GET/POST /api/admin/clients`, `PUT/DELETE /api/admin/clients/:slug` — Admin client portal lifecycle.
-
-### PushPress Grow Migration
-- `POST /api/client/:slug/import-csv`
-  - Body: `{ "kind": "contacts" | "opportunities", "csvText": "..." }` (or JSON array `rows`).
-  - Full RFC-4180 CSV parsing (quoted commas, embedded newlines, CRLF/LF, escaped quotes).
-  - Auto-maps `First Name`, `Last Name`, `Email`, `Phone`, `Tags`, `Status`, `Source`, `Birthday`, `Injury Notes`, `Stage`, `Value`, `Membership Tier`.
-  - Deduplicates contacts by normalized email/phone and opportunities by email/phone/`name+stage`.
-  - Returns `{ ok: true, kind, added, updated, merged, total }`.
-
-### Channel Dispatchers & Honest Dry-Run Mode
-- `POST /api/client/:slug/send-sms` — Twilio REST API (`TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER`)
-- `POST /api/client/:slug/send-email` — Priority order:
-  1. **Resend API** (`RESEND_API_KEY`) -> returns `mode: "live_resend"`
-  2. **Native TLS SMTP** (`SMTP_HOST`, `SMTP_USER`, `SMTP_PASS`, e.g., Namecheap Private Email `mail.privateemail.com:465` SMTPS or `:587` STARTTLS) -> returns `mode: "live_smtp"` with exact RFC `Message-ID`
-  3. **Honest Queue Fallback** -> appends to inbox/queue and returns `mode: "dry_run_queued"`, `missingEnv: ["RESEND_API_KEY or SMTP_*"]`
-- `POST /api/client/:slug/send-ig-dm` — Meta Graph API (`META_ACCESS_TOKEN`, `META_IG_USER_ID`)
-- `POST /api/client/:slug/trigger-workflow` — Runs workflow template + channel dispatch / webhook forward (`WEBHOOK_URL` or client `webhookUrl`)
-- `POST /api/client/:slug/sync-meta-ads` — Meta Marketing API (`META_ACCESS_TOKEN`, `META_AD_ACCOUNT_ID`)
-
-#### Native Namecheap Private Email SMTP (`mail.privateemail.com:465`)
-Configure in local gitignored `.env` (never commit `.env` or real passwords):
-```env
-SMTP_HOST=mail.privateemail.com
-SMTP_PORT=465
-SMTP_USER=connect@rivvak.com
-SMTP_PASS=<your-privateemail-app-password>
-SMTP_FROM=Rivvak Media <connect@rivvak.com>
-```
-`server.js` automatically loads `.env` at startup and exposes `verifySmtpAuth(cfg)` (performs `EHLO` + `AUTH LOGIN` + `QUIT` without sending mail) and `sendSmtpEmail(cfg)`.
-
-Whenever required provider credentials are omitted from `.env`, the server **never fabricates live delivery**: it logs the message/run into `outboundQueue`, `inboxThreads`, and `executionLogs`, returning:
-
-```json
-{
-  "ok": true,
-  "mode": "dry_run_queued",
-  "missingEnv": ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM_NUMBER"]
-}
-```
+- `POST /api/client/:slug/import-csv` — RFC-4180 PushPress Grow CSV migration & deduplication (`contacts` / `opportunities`).
+- `POST /api/client/:slug/send-sms` — Twilio REST API (`dry_run_queued` fallback when env vars omitted).
+- `POST /api/client/:slug/send-email` — Priority: Resend API (`RESEND_API_KEY`) -> Native TLS SMTP (`SMTP_HOST/SMTP_USER/SMTP_PASS`) -> `dry_run_queued`.
+- `POST /api/client/:slug/send-ig-dm` — Meta Graph API (`dry_run_queued` fallback when env vars omitted).
+- `POST /api/client/:slug/trigger-workflow` — Runs workflow template + channel dispatch / webhook forward.
+- `POST /api/client/:slug/sync-meta-ads` — Meta Marketing API campaign sync.
+- `POST /api/client/:slug/scheduler/tick` — Client-scoped scheduler execution.
 
 ### Inbound Webhooks
-- `POST /webhooks/twilio` — Accepts URL-encoded or JSON Twilio SMS payloads (`From`, `To`, `Body`), appends to the matching client's Unified Inbox (`channel: "SMS"`), increments `unread`.
-- `GET /webhooks/meta` — Verifies `hub.mode=subscribe` & `hub.verify_token` (`META_VERIFY_TOKEN`), echoes `hub.challenge`.
-- `POST /webhooks/meta` — Parses Meta Instagram DM webhook payloads into Unified Inbox (`channel: "Instagram DM"`).
-- `POST /webhooks/gbp-review` — Logs incoming Google Business Profile reviews into Unified Inbox (`channel: "Google Reviews"`).
+- `POST /webhooks/stripe` — Handles `checkout.session.completed`, `invoice.paid`, `invoice.payment_failed`, and `customer.subscription.deleted`. Verifies `Stripe-Signature` HMAC-SHA256 (`t=...,v1=...`) via `crypto.timingSafeEqual` when `STRIPE_WEBHOOK_SECRET` is configured (`400` on invalid). Logs events into `store.stripeEvents` (cap `200`) and updates matching client billing/payment records & `executionLogs`.
+- `POST /webhooks/twilio` — Accepts URL-encoded or JSON Twilio SMS payloads into Unified Inbox.
+- `GET /webhooks/meta` & `POST /webhooks/meta` — Meta IG DM verification challenge & inbound DM ingestion.
+- `POST /webhooks/gbp-review` — Logs incoming Google Business Profile reviews into Unified Inbox.
 
 ### 24/7 Scheduler Engine
-- Runs on `SCHEDULER_INTERVAL_MS` (default `60000`ms) and can be triggered manually via:
-  - `POST /api/admin/scheduler/tick`
-  - `POST /api/client/:slug/scheduler/tick`
-- Idempotently checks:
-  1. Upcoming booking reminders (`24h` & `2h` windows)
-  2. Member birthdays matching `MM-DD`
-  3. Member retention check-ins at `7`, `14`, and `30` days
-  4. Due scheduled social posts (`scheduledAt <= now`)
+Idempotently checks (via `client.processedScheduleKeys`):
+1. Upcoming booking reminders (`24h` & `2h` windows)
+2. Member birthdays matching `MM-DD`
+3. Member retention check-ins at `7`, `14`, and `30` days
+4. Due scheduled social posts (`scheduledAt <= now`)
+5. 3-day-ahead retainer/renewal reminders (`0..3` days prior to due date)
 
 ---
 
-## Deploying to Railway / Render / Fly.io / VPS
+## Deploying to Render / Docker
 
-1. Push `automation-backend/` to a private repository or deploy directory.
-2. Set Start Command to `node server.js` and mount a persistent volume at `/app/data` (`DATA_DIR=/app/data`).
-3. Configure `ADMIN_PASSCODE` plus Twilio (`TWILIO_*`), Resend (`RESEND_*`), and Meta (`META_*`) environment variables when carrier/social accounts are connected.
-4. Copy the live HTTPS URL (e.g., `https://api.rivvak-growth.example.com`) into `/pages/partner-dashboard` -> **Tab 9 (Client Portals & Growth OS)** -> **Cloud Sync & Webhook Automation** (`Backend API URL` + `Admin Secret`).
+- **Render Blueprint (`render.yaml`)**: Ready-to-deploy web service (`automation-backend`, Node runtime, `node server.js`, `/api/health` check, `autoDeploy: true`). Add secrets (`ADMIN_PASSCODE`, `SMTP_PASS`, `STRIPE_WEBHOOK_SECRET`, etc.) inside the Render Dashboard — never commit `.env`.
+- **Docker (`Dockerfile` + `.dockerignore`)**: Multi-layer `node:20-alpine` image running as non-root `node` user on port `8787` with built-in `/api/health` `HEALTHCHECK`. Mount persistent storage at `/app/data` (`DATA_DIR=/app/data`).

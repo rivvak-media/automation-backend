@@ -1,14 +1,16 @@
 'use strict';
 
 /**
- * Rivvak Media Automation Backend Engine
+ * Rivvak Media Automation Backend Engine v2.0.0
  * Zero-dependency Node.js multi-tenant server providing:
- * - Persistent JSON store (data/store.json) with Clean Results & Carleen Ligozio seeds
- * - Strict CORS & Bearer token isolation (Admin vs Client accessCode)
+ * - Persistent JSON store (data/store.json) with atomic .tmp+rename & .bak recovery
+ * - Dark-obsidian HTML status dashboard & /api/health endpoint
+ * - Public lead intake (/api/public/lead) with sliding-window rate limiter, honeypot, Resend/SMTP alerts & auto-reply
+ * - Strict CORS & constant-time Bearer token isolation (Admin vs Client accessCode)
  * - RFC-4180 PushPress Grow CSV migration & deduplication (Contacts & Opportunities)
- * - Live channel dispatchers via native fetch (Twilio, Resend, Meta Graph, Webhooks) with honest dry_run_queued mode
- * - Inbound webhooks (Twilio SMS, Meta IG DM verify + events, Google Business Profile reviews)
- * - Idempotent 24/7 workflow scheduler (24h/2h bookings, birthdays, 7/14/30d retention, due social posts)
+ * - Live channel dispatchers via native fetch / TLS SMTP & IMAP inbox summary with honest dry-run mode
+ * - Inbound webhooks (Twilio SMS, Meta IG DM verify + events, Google Business Profile reviews, Stripe HMAC-SHA256)
+ * - Idempotent 24/7 workflow scheduler (24h/2h bookings, birthdays, 7/14/30d retention, due posts, 3d retainer reminders)
  */
 
 const http = require('http');
@@ -20,7 +22,21 @@ const querystring = require('querystring');
 const tls = require('tls');
 const net = require('net');
 
+const SERVICE_NAME = 'rivvak-automation-backend';
+const BRAND_NAME = 'Rivvak Media';
+const SERVICE_VERSION = '2.0.0';
 const MAX_BODY_BYTES = 10 * 1024 * 1024;
+const MAX_PUBLIC_LEADS = 500;
+const MAX_STRIPE_EVENTS = 200;
+const LEAD_RATE_WINDOW_MS = 10 * 60 * 1000;
+const LEAD_RATE_MAX_REQUESTS = 10;
+const VALID_LEAD_STATUSES = new Set(['new', 'contacted', 'qualified', 'won', 'archived']);
+const HANDLED_STRIPE_EVENTS = new Set([
+  'checkout.session.completed',
+  'invoice.paid',
+  'invoice.payment_failed',
+  'customer.subscription.deleted',
+]);
 
 const CANONICAL_STAGES = [
   'New Lead',
@@ -85,7 +101,7 @@ function createDefaultStore(env = process.env) {
   const minusDays = (d) => new Date(now.getTime() - d * 86400000).toISOString().slice(0, 10);
 
   return {
-    version: 1,
+    version: 2,
     updatedAt: nowIso,
     settings: {
       agencyName: 'Rivvak Media',
@@ -770,6 +786,33 @@ function createDefaultStore(env = process.env) {
         processedScheduleKeys: {},
       },
     },
+    publicLeads: [
+      {
+        id: 'lead_blue_diamond_pools',
+        ticketId: 'RV-BDP-001',
+        name: 'Jaime',
+        business: 'Blue Diamond Pools',
+        email: 'info@bluediamondpools.com',
+        phone: '(954) 755-0777',
+        website: 'https://bluediamondpools.com/',
+        pageUrl: 'https://bluediamondpools.com/',
+        location: 'Broward & Palm Beach County',
+        industry: 'Pools & Outdoor',
+        scope: 'Interactive Pool Transformation Showcase + Quote Calculator + Broward & Palm Beach Local SEO',
+        estimatedSetup: '$1,950',
+        estimatedMonthly: '$500/mo',
+        message: 'Seeded prospect: Blue Diamond Pools (Jaime) — https://bluediamondpools.com/ — Broward & Palm Beach County.',
+        status: 'qualified',
+        source: 'Google Doc — Jaime Pool Company',
+        notes: 'Initial agency prospect synced from Google Doc — Jaime Pool Company.',
+        emailDispatched: false,
+        emailMode: 'seeded',
+        autoReplySent: false,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      },
+    ],
+    stripeEvents: [],
   };
 }
 
@@ -785,58 +828,353 @@ function resolveStorePath(options = {}) {
 }
 
 /**
- * Load store from disk, creating seeded store.json if missing.
+ * Normalize required store fields cleanly without clobbering existing tenant data.
+ * @param {object} parsed
+ * @param {object} env
+ * @returns {object}
+ */
+function normalizeStoreShape(parsed, env = process.env) {
+  const defaults = createDefaultStore(env);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return defaults;
+  }
+  if (!parsed.clients || typeof parsed.clients !== 'object' || Array.isArray(parsed.clients)) {
+    parsed.clients = defaults.clients;
+  }
+  if (!parsed.settings || typeof parsed.settings !== 'object') {
+    parsed.settings = defaults.settings;
+  } else {
+    parsed.settings = { ...defaults.settings, ...parsed.settings };
+  }
+  if (!parsed.adminState || typeof parsed.adminState !== 'object') {
+    parsed.adminState = defaults.adminState;
+  }
+  if (!Array.isArray(parsed.publicLeads)) {
+    parsed.publicLeads = defaults.publicLeads;
+  }
+  if (!Array.isArray(parsed.stripeEvents)) {
+    parsed.stripeEvents = [];
+  }
+  if (!parsed.version) {
+    parsed.version = 2;
+  }
+  return parsed;
+}
+
+/**
+ * Attempt to parse a store JSON file on disk, ensuring it contains a valid clients map.
+ * @param {string} filePath
+ * @returns {object|null}
+ */
+function tryReadValidStoreFile(filePath) {
+  if (!fs.existsSync(filePath)) return null;
+  try {
+    const raw = fs.readFileSync(filePath, 'utf8').trim();
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || !parsed.clients || typeof parsed.clients !== 'object' || Array.isArray(parsed.clients)) {
+      return null;
+    }
+    return parsed;
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * Load store from disk with automatic .bak recovery on missing/corrupted store.json.
  * @param {string} storePath
  * @param {object} env
  * @returns {object}
  */
 function loadStore(storePath, env = process.env) {
   fs.mkdirSync(path.dirname(storePath), { recursive: true });
-  if (!fs.existsSync(storePath)) {
-    const initial = createDefaultStore(env);
-    saveStore(storePath, initial);
-    return initial;
+  const bakPath = `${storePath}.bak`;
+
+  const primary = tryReadValidStoreFile(storePath);
+  if (primary) {
+    return normalizeStoreShape(primary, env);
   }
-  const raw = fs.readFileSync(storePath, 'utf8').trim();
-  if (!raw) {
-    const initial = createDefaultStore(env);
-    saveStore(storePath, initial);
-    return initial;
+
+  const backup = tryReadValidStoreFile(bakPath);
+  if (backup) {
+    const recovered = normalizeStoreShape(backup, env);
+    const serialized = JSON.stringify(recovered, null, 2);
+    const tmpPath = `${storePath}.${process.pid}.${Date.now()}.recover.tmp`;
+    fs.writeFileSync(tmpPath, serialized, 'utf8');
+    fs.renameSync(tmpPath, storePath);
+    return recovered;
   }
-  const parsed = JSON.parse(raw);
-  if (!parsed.clients || typeof parsed.clients !== 'object') {
-    parsed.clients = createDefaultStore(env).clients;
-  }
-  if (!parsed.settings) {
-    parsed.settings = createDefaultStore(env).settings;
-  }
-  return parsed;
+
+  const initial = createDefaultStore(env);
+  saveStore(storePath, initial);
+  return initial;
 }
 
 /**
- * Atomically persist store JSON to disk.
+ * Atomically persist store JSON to disk (.tmp + rename) and maintain a valid .bak snapshot.
  * @param {string} storePath
  * @param {object} store
  */
 function saveStore(storePath, store) {
   fs.mkdirSync(path.dirname(storePath), { recursive: true });
   store.updatedAt = new Date().toISOString();
+  const serialized = JSON.stringify(store, null, 2);
+  const bakPath = `${storePath}.bak`;
+
+  if (fs.existsSync(storePath)) {
+    try {
+      const currentRaw = fs.readFileSync(storePath, 'utf8');
+      if (currentRaw.trim()) {
+        const parsed = JSON.parse(currentRaw);
+        if (parsed && typeof parsed.clients === 'object') {
+          const bakTmp = `${bakPath}.${process.pid}.${Date.now()}.tmp`;
+          fs.writeFileSync(bakTmp, currentRaw, 'utf8');
+          fs.renameSync(bakTmp, bakPath);
+        }
+      }
+    } catch (_) {
+      // Never overwrite a good .bak with corrupted store.json bytes
+    }
+  }
+
   const tmpPath = `${storePath}.${process.pid}.${Date.now()}.tmp`;
-  fs.writeFileSync(tmpPath, JSON.stringify(store, null, 2), 'utf8');
+  fs.writeFileSync(tmpPath, serialized, 'utf8');
   fs.renameSync(tmpPath, storePath);
 }
 
 /**
- * Constant-time string comparison via SHA-256 digests.
+ * Constant-time token comparison via SHA-256 digests and crypto.timingSafeEqual.
  * @param {string} a
  * @param {string} b
  * @returns {boolean}
  */
-function safeEqual(a, b) {
+function safeEqualToken(a, b) {
   if (typeof a !== 'string' || typeof b !== 'string' || !a || !b) return false;
-  const hashA = crypto.createHash('sha256').update(a).digest();
-  const hashB = crypto.createHash('sha256').update(b).digest();
+  const hashA = crypto.createHash('sha256').update(a, 'utf8').digest();
+  const hashB = crypto.createHash('sha256').update(b, 'utf8').digest();
   return crypto.timingSafeEqual(hashA, hashB);
+}
+
+/**
+ * Alias preserved for internal callers.
+ */
+function safeEqual(a, b) {
+  return safeEqualToken(a, b);
+}
+
+/**
+ * Apply baseline defensive HTTP security headers.
+ * @param {http.ServerResponse} res
+ */
+function applySecurityHeaders(res) {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('X-Frame-Options', 'DENY');
+}
+
+/**
+ * Escape HTML special characters for safe server-side rendering.
+ * @param {string} value
+ * @returns {string}
+ */
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/**
+ * Check whether Native TLS SMTP credentials are configured.
+ * @param {object} env
+ * @returns {boolean}
+ */
+function isSmtpConfigured(env = process.env) {
+  return Boolean(env.SMTP_HOST && env.SMTP_USER && env.SMTP_PASS);
+}
+
+/**
+ * Check whether any live transactional email provider (Resend or SMTP) is configured.
+ * @param {object} env
+ * @returns {boolean}
+ */
+function isLiveEmailConfigured(env = process.env) {
+  return Boolean(env.RESEND_API_KEY || isSmtpConfigured(env));
+}
+
+/**
+ * Render the dark-obsidian Rivvak Media status HTML dashboard for GET /.
+ */
+function renderStatusDashboardHtml({ uptimeSeconds, clientsCount, publicLeadsCount, smtpConfigured }) {
+  const smtpLabel = smtpConfigured ? 'Configured' : 'Dry-Run';
+  const smtpClass = smtpConfigured ? 'badge-ok' : 'badge-warn';
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Rivvak Media — Cloud Automation Engine</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: #09090B;
+      color: #F4F4F5;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+    .card {
+      width: 100%;
+      max-width: 680px;
+      background: #111114;
+      border: 1px solid #27272A;
+      border-radius: 16px;
+      padding: 32px;
+      box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
+    }
+    .top {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 20px;
+    }
+    .brand {
+      font-size: 12px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: #A1A1AA;
+      font-weight: 600;
+    }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 12px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      background: rgba(16, 185, 129, 0.14);
+      color: #34D399;
+      border: 1px solid rgba(16, 185, 129, 0.35);
+    }
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #10B981;
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 24px;
+      line-height: 1.25;
+      color: #FFFFFF;
+    }
+    p.sub {
+      margin: 0 0 24px;
+      color: #A1A1AA;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 12px;
+      margin-bottom: 24px;
+    }
+    .metric {
+      background: #09090B;
+      border: 1px solid #27272A;
+      border-radius: 12px;
+      padding: 14px 16px;
+    }
+    .metric-label {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #71717A;
+      margin-bottom: 6px;
+    }
+    .metric-val {
+      font-size: 20px;
+      font-weight: 700;
+      color: #FAFAFA;
+    }
+    .badge-ok { color: #34D399; }
+    .badge-warn { color: #FBBF24; }
+    .links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      padding-top: 20px;
+      border-top: 1px solid #27272A;
+    }
+    a.btn {
+      display: inline-flex;
+      align-items: center;
+      padding: 10px 16px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      text-decoration: none;
+      border: 1px solid #27272A;
+      color: #FAFAFA;
+      background: #18181B;
+    }
+    a.btn-primary {
+      background: #0F766E;
+      border-color: #0F766E;
+      color: #FFFFFF;
+    }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <div class="top">
+      <span class="brand">Rivvak Media Cloud</span>
+      <span class="pill"><span class="dot"></span> ONLINE</span>
+    </div>
+    <h1>Rivvak Media — Cloud Automation Engine</h1>
+    <p class="sub">Zero-dependency multi-tenant CRM, public intake, transactional dispatch, and 24/7 automation scheduler.</p>
+    <section class="grid">
+      <div class="metric">
+        <div class="metric-label">Version</div>
+        <div class="metric-val">${escapeHtml(SERVICE_VERSION)}</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Uptime</div>
+        <div class="metric-val">${escapeHtml(uptimeSeconds)}s</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Active Clients</div>
+        <div class="metric-val">${escapeHtml(clientsCount)}</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Public Leads</div>
+        <div class="metric-val">${escapeHtml(publicLeadsCount)}</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">SMTP Status</div>
+        <div class="metric-val ${smtpClass}">${escapeHtml(smtpLabel)}</div>
+      </div>
+    </section>
+    <nav class="links">
+      <a class="btn btn-primary" href="/api/health">Health JSON (/api/health)</a>
+      <a class="btn" href="https://rivvak.com/" rel="noopener noreferrer">Rivvak Media Studio</a>
+    </nav>
+  </main>
+</body>
+</html>`;
 }
 
 /**
@@ -887,11 +1225,28 @@ function applyCors(req, res, env = process.env) {
  * @param {http.ServerResponse} res
  * @param {number} statusCode
  * @param {object} payload
+ * @param {Record<string, string>} extraHeaders
  */
-function sendJson(res, statusCode, payload) {
+function sendJson(res, statusCode, payload, extraHeaders = {}) {
   const body = JSON.stringify(payload);
   res.writeHead(statusCode, {
     'Content-Type': 'application/json; charset=utf-8',
+    'Content-Length': Buffer.byteLength(body),
+    ...extraHeaders,
+  });
+  res.end(body);
+}
+
+/**
+ * Send HTML HTTP response.
+ * @param {http.ServerResponse} res
+ * @param {number} statusCode
+ * @param {string} html
+ */
+function sendHtml(res, statusCode, html) {
+  const body = String(html);
+  res.writeHead(statusCode, {
+    'Content-Type': 'text/html; charset=utf-8',
     'Content-Length': Buffer.byteLength(body),
   });
   res.end(body);
@@ -960,7 +1315,7 @@ function readRequestBody(req) {
 }
 
 /**
- * Authenticate incoming Bearer token as admin or single-tenant client.
+ * Authenticate incoming Bearer token as admin or single-tenant client using constant-time comparison.
  * @param {http.IncomingMessage} req
  * @param {object} store
  * @param {string} adminPasscode
@@ -971,11 +1326,11 @@ function authenticateRequest(req, store, adminPasscode) {
   const match = authHeader.match(/^Bearer\s+(.+)$/i);
   const token = match ? match[1].trim() : '';
   if (!token) return null;
-  if (safeEqual(token, adminPasscode)) {
+  if (safeEqualToken(token, adminPasscode)) {
     return { role: 'admin' };
   }
   for (const [slug, client] of Object.entries(store.clients || {})) {
-    if (client && client.accessCode && safeEqual(token, String(client.accessCode))) {
+    if (client && client.accessCode && safeEqualToken(token, String(client.accessCode))) {
       return { role: 'client', clientSlug: slug };
     }
   }
@@ -1734,6 +2089,451 @@ async function sendSmtpEmail(cfg = {}) {
 }
 
 /**
+ * Shared transactional email dispatcher: Resend API -> Native TLS SMTP -> Honest dry_run_queued.
+ */
+async function sendTransactionalEmail({ to, subject, text, html, from, replyTo }, ctx = {}) {
+  const env = ctx.env || process.env;
+  const fetchImpl = ctx.fetchImpl || globalThis.fetch;
+  const smtpSendImpl = ctx.smtpSendImpl || sendSmtpEmail;
+  const defaultFrom = from || env.RESEND_FROM || env.SMTP_FROM || env.SMTP_USER || 'Rivvak Media <connect@rivvak.com>';
+
+  if (env.RESEND_API_KEY) {
+    const resp = await fetchImpl('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${env.RESEND_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        from: defaultFrom,
+        to: [to],
+        subject,
+        text,
+        ...(html ? { html } : {}),
+        ...(replyTo ? { reply_to: replyTo } : {}),
+      }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      return {
+        ok: false,
+        statusCode: 502,
+        mode: 'resend_error',
+        error: data.message || 'Resend API error',
+        status: resp.status,
+        fromUsed: defaultFrom,
+      };
+    }
+    return {
+      ok: true,
+      statusCode: 200,
+      mode: 'live_resend',
+      id: data.id,
+      messageId: data.id,
+      fromUsed: defaultFrom,
+    };
+  }
+
+  if (isSmtpConfigured(env)) {
+    const smtpHost = env.SMTP_HOST;
+    const smtpPort = Number(env.SMTP_PORT || 465);
+    const isLoopbackPlain =
+      env.SMTP_PLAIN === 'true' && (smtpHost === '127.0.0.1' || smtpHost === 'localhost');
+    const smtpSender = from || env.SMTP_FROM || env.RESEND_FROM || env.SMTP_USER;
+    try {
+      const smtpRes = await smtpSendImpl({
+        host: smtpHost,
+        port: smtpPort,
+        user: env.SMTP_USER,
+        pass: env.SMTP_PASS,
+        from: smtpSender,
+        to,
+        subject,
+        text,
+        replyTo,
+        plain: isLoopbackPlain,
+      });
+      return {
+        ok: true,
+        statusCode: 200,
+        mode: 'live_smtp',
+        messageId: smtpRes.messageId,
+        response: smtpRes.response,
+        fromUsed: smtpSender,
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        statusCode: 502,
+        mode: 'smtp_error',
+        error: err.message || 'SMTP delivery failed',
+        fromUsed: smtpSender,
+      };
+    }
+  }
+
+  return {
+    ok: true,
+    statusCode: 200,
+    mode: 'dry_run_queued',
+    missingEnv: ['RESEND_API_KEY or SMTP_*'],
+    fromUsed: defaultFrom,
+  };
+}
+
+/**
+ * Decode RFC-2047 encoded-word MIME headers (=?UTF-8?B?...?= and =?UTF-8?Q?...?=).
+ * @param {string} value
+ * @returns {string}
+ */
+function decodeMimeWords(value) {
+  return String(value || '').replace(/=\?([^?]+)\?([BQ])\?([^?]*)\?=/gi, (full, _cs, enc, text) => {
+    try {
+      if (enc.toUpperCase() === 'B') {
+        return Buffer.from(text, 'base64').toString('utf8');
+      }
+      const bytes = [];
+      for (let i = 0; i < text.length; i++) {
+        if (text[i] === '_') {
+          bytes.push(0x20);
+        } else if (text[i] === '=' && /^[0-9A-Fa-f]{2}$/.test(text.slice(i + 1, i + 3))) {
+          bytes.push(parseInt(text.slice(i + 1, i + 3), 16));
+          i += 2;
+        } else {
+          bytes.push(text.charCodeAt(i));
+        }
+      }
+      return Buffer.from(bytes).toString('utf8');
+    } catch (_) {
+      return full;
+    }
+  });
+}
+
+function escapeImapQuoted(value) {
+  return String(value || '')
+    .replace(/[\r\n]/g, '')
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"');
+}
+
+function tryConsumeImapRecord(buf) {
+  let cursor = 0;
+  const segments = [];
+  while (cursor < buf.length) {
+    const crlf = buf.indexOf('\r\n', cursor);
+    const lf = crlf === -1 ? buf.indexOf('\n', cursor) : -1;
+    const eol = crlf !== -1 ? crlf : lf;
+    const eolLen = crlf !== -1 ? 2 : 1;
+    if (eol === -1) return null;
+    const linePart = buf.slice(cursor, eol).toString('utf8');
+    segments.push(linePart);
+    cursor = eol + eolLen;
+    const litMatch = linePart.match(/\{(\d+)\+?\}$/);
+    if (litMatch) {
+      const litLen = Number(litMatch[1]);
+      if (buf.length < cursor + litLen) return null;
+      segments.push({ literal: buf.slice(cursor, cursor + litLen).toString('utf8') });
+      cursor += litLen;
+      continue;
+    }
+    return { segments, rest: buf.slice(cursor) };
+  }
+  return null;
+}
+
+function parseHeaderBlock(rawHeaders) {
+  const unfolded = String(rawHeaders || '').replace(/\r?\n[ \t]+/g, ' ');
+  const out = { date: '', from: '', subject: '' };
+  for (const line of unfolded.split(/\r?\n/)) {
+    const idx = line.indexOf(':');
+    if (idx === -1) continue;
+    const key = line.slice(0, idx).trim().toLowerCase();
+    const val = decodeMimeWords(line.slice(idx + 1).trim());
+    if (key === 'date' && !out.date) out.date = val;
+    else if (key === 'from' && !out.from) out.from = val;
+    else if (key === 'subject' && !out.subject) out.subject = val;
+  }
+  return out;
+}
+
+/**
+ * Connect via zero-dependency Node TLS IMAP4rev1, EXAMINE INBOX read-only, and fetch latest email headers.
+ * Returns honest dry_run_unconfigured if host/user/pass are absent.
+ * @param {object} cfg
+ * @returns {Promise<{ ok: boolean, mode: string, folder?: string, total?: number, messages: Array<object> }>}
+ */
+async function fetchImapInboxSummary(cfg = {}) {
+  const host = cfg.host || cfg.imapHost || '';
+  const port = Number(cfg.port || cfg.imapPort || 993);
+  const user = cfg.user || '';
+  const pass = cfg.pass || '';
+  const limit = Math.max(1, Math.min(50, Number(cfg.limit || 12) || 12));
+  const timeoutMs = Math.max(500, Number(cfg.timeoutMs || 8000) || 8000);
+
+  if (!host || !user || !pass) {
+    return {
+      ok: true,
+      mode: 'dry_run_unconfigured',
+      messages: [],
+    };
+  }
+
+  const isPlain = Boolean(cfg.plain);
+  let socket = null;
+  let deadlineTimer = null;
+
+  const openSocket = () =>
+    new Promise((resolve, reject) => {
+      const onErr = (err) => reject(err);
+      if (typeof cfg.connectFn === 'function') {
+        const s = cfg.connectFn({ host, port }, () => {
+          s.removeListener('error', onErr);
+          resolve(s);
+        });
+        s.once('error', onErr);
+        return;
+      }
+      if (isPlain) {
+        const s = net.connect({ host, port }, () => {
+          s.removeListener('error', onErr);
+          resolve(s);
+        });
+        s.once('error', onErr);
+        return;
+      }
+      const s = tls.connect(
+        {
+          host,
+          port,
+          servername: host,
+          ...(cfg.tlsOptions || {}),
+        },
+        () => {
+          s.removeListener('error', onErr);
+          resolve(s);
+        }
+      );
+      s.once('error', onErr);
+    });
+
+  const runSession = async () => {
+    socket = await openSocket();
+    socket.setTimeout(timeoutMs);
+
+    let buffer = Buffer.alloc(0);
+    const records = [];
+    let waiter = null;
+
+    const wake = () => {
+      if (waiter) {
+        const fn = waiter;
+        waiter = null;
+        fn();
+      }
+    };
+
+    socket.on('data', (chunk) => {
+      buffer = Buffer.concat([buffer, Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)]);
+      let rec;
+      while ((rec = tryConsumeImapRecord(buffer)) !== null) {
+        buffer = rec.rest;
+        records.push(rec.segments);
+      }
+      wake();
+    });
+
+    let streamErr = null;
+    socket.on('error', (err) => {
+      streamErr = err;
+      wake();
+    });
+    socket.on('timeout', () => {
+      streamErr = new Error('IMAP socket timeout');
+      try {
+        socket.destroy();
+      } catch (_) {}
+      wake();
+    });
+    socket.on('close', () => {
+      if (!streamErr) streamErr = new Error('IMAP connection closed');
+      wake();
+    });
+
+    const nextRecord = () =>
+      new Promise((resolve, reject) => {
+        const check = () => {
+          if (records.length > 0) {
+            resolve(records.shift());
+            return true;
+          }
+          if (streamErr) {
+            reject(streamErr);
+            return true;
+          }
+          return false;
+        };
+        if (check()) return;
+        const poll = () => {
+          if (!check()) waiter = poll;
+        };
+        waiter = poll;
+      });
+
+    // Wait for server greeting (* OK ...)
+    const greeting = await nextRecord();
+    const greetingText = greeting.filter((s) => typeof s === 'string').join(' ');
+    if (/^\*\s*(NO|BAD|BYE)/i.test(greetingText)) {
+      throw new Error(`IMAP server rejected connection: ${greetingText}`);
+    }
+
+    let tagSeq = 0;
+    const sendCmd = async (cmdLine) => {
+      const tag = `A${String(++tagSeq).padStart(3, '0')}`;
+      socket.write(`${tag} ${cmdLine}\r\n`);
+      const collected = [];
+      while (true) {
+        const rec = await nextRecord();
+        const textJoin = rec.filter((s) => typeof s === 'string').join(' ').trim();
+        if (textJoin.startsWith(`${tag} `)) {
+          const statusMatch = textJoin.match(new RegExp(`^${tag}\\s+(OK|NO|BAD)\\b(.*)$`, 'i'));
+          if (statusMatch) {
+            const status = statusMatch[1].toUpperCase();
+            if (status !== 'OK') {
+              throw new Error(`IMAP command failed (${tag}): ${textJoin}`);
+            }
+            return { tag, status, line: textJoin, untagged: collected };
+          }
+        }
+        collected.push(rec);
+      }
+    };
+
+    await sendCmd(`LOGIN "${escapeImapQuoted(user)}" "${escapeImapQuoted(pass)}"`);
+    const examine = await sendCmd('EXAMINE INBOX');
+    let total = 0;
+    for (const rec of examine.untagged) {
+      const line = rec.filter((s) => typeof s === 'string').join(' ');
+      const existsMatch = line.match(/^\*\s+(\d+)\s+EXISTS\b/i);
+      if (existsMatch) total = Number(existsMatch[1]);
+    }
+
+    if (total <= 0) {
+      await sendCmd('LOGOUT').catch(() => {});
+      return { ok: true, mode: 'live_imap', folder: 'INBOX', total: 0, messages: [] };
+    }
+
+    const startSeq = Math.max(1, total - limit + 1);
+    const fetchRes = await sendCmd(
+      `FETCH ${startSeq}:${total} (UID FLAGS INTERNALDATE BODY.PEEK[HEADER.FIELDS (DATE FROM SUBJECT)])`
+    );
+
+    const messages = [];
+    for (const rec of fetchRes.untagged) {
+      const fullText = rec.filter((s) => typeof s === 'string').join(' ');
+      const seqMatch = fullText.match(/^\*\s+(\d+)\s+FETCH\b/i);
+      if (!seqMatch) continue;
+      const uidMatch = fullText.match(/\bUID\s+(\d+)\b/i);
+      const flagsMatch = fullText.match(/\bFLAGS\s*\(([^)]*)\)/i);
+      const internalDateMatch = fullText.match(/\bINTERNALDATE\s+"([^"]+)"/i);
+      const literalSeg = rec.find((s) => s && typeof s === 'object' && typeof s.literal === 'string');
+      const headers = parseHeaderBlock(literalSeg ? literalSeg.literal : '');
+      messages.push({
+        uid: uidMatch ? Number(uidMatch[1]) : Number(seqMatch[1]),
+        date: headers.date || (internalDateMatch ? internalDateMatch[1] : ''),
+        from: headers.from,
+        subject: headers.subject || '(No Subject)',
+        seen: flagsMatch ? /\\Seen/i.test(flagsMatch[1]) : false,
+      });
+    }
+
+    messages.sort((a, b) => b.uid - a.uid);
+    await sendCmd('LOGOUT').catch(() => {});
+
+    return {
+      ok: true,
+      mode: 'live_imap',
+      folder: 'INBOX',
+      total,
+      messages: messages.slice(0, limit),
+    };
+  };
+
+  try {
+    const deadlinePromise = new Promise((_, reject) => {
+      deadlineTimer = setTimeout(() => {
+        if (socket) {
+          try {
+            socket.destroy();
+          } catch (_) {}
+        }
+        reject(new Error(`IMAP summary timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+      if (typeof deadlineTimer.unref === 'function') deadlineTimer.unref();
+    });
+    return await Promise.race([runSession(), deadlinePromise]);
+  } finally {
+    if (deadlineTimer) clearTimeout(deadlineTimer);
+    if (socket) {
+      try {
+        socket.end();
+      } catch (_) {}
+    }
+  }
+}
+
+/**
+ * Verify Stripe-Signature header (t=...,v1=...) using HMAC-SHA256 & crypto.timingSafeEqual.
+ * @param {string} rawBody
+ * @param {string} signatureHeader
+ * @param {string} secret
+ * @param {number} toleranceSec
+ * @returns {{ valid: boolean, timestamp?: number, reason?: string }}
+ */
+function verifyStripeSignature(rawBody, signatureHeader, secret, toleranceSec = 300) {
+  if (!secret || typeof secret !== 'string') {
+    return { valid: false, reason: 'Missing webhook secret' };
+  }
+  const header = String(signatureHeader || '').trim();
+  if (!header) {
+    return { valid: false, reason: 'Missing Stripe-Signature header' };
+  }
+  let timestamp = '';
+  const signatures = [];
+  for (const part of header.split(',')) {
+    const eq = part.indexOf('=');
+    if (eq === -1) continue;
+    const k = part.slice(0, eq).trim();
+    const v = part.slice(eq + 1).trim();
+    if (k === 't') timestamp = v;
+    else if (k === 'v1' && v) signatures.push(v);
+  }
+  const tNum = Number(timestamp);
+  if (!timestamp || !Number.isFinite(tNum) || tNum <= 0 || signatures.length === 0) {
+    return { valid: false, reason: 'Malformed Stripe-Signature header' };
+  }
+  if (toleranceSec > 0) {
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (Math.abs(nowSec - tNum) > toleranceSec) {
+      return { valid: false, reason: 'Stripe-Signature timestamp outside tolerance' };
+    }
+  }
+  const expectedHex = crypto
+    .createHmac('sha256', secret)
+    .update(`${timestamp}.${String(rawBody || '')}`, 'utf8')
+    .digest('hex');
+  const expectedBuf = Buffer.from(expectedHex, 'hex');
+  for (const sig of signatures) {
+    if (!/^[0-9a-f]+$/i.test(sig)) continue;
+    const sigBuf = Buffer.from(sig, 'hex');
+    if (sigBuf.length === expectedBuf.length && crypto.timingSafeEqual(expectedBuf, sigBuf)) {
+      return { valid: true, timestamp: tNum };
+    }
+  }
+  return { valid: false, reason: 'Signature mismatch' };
+}
+
+/**
  * Dispatch an outbound channel message or workflow webhook honestly.
  * Never fabricates live carrier delivery when env vars are missing.
  */
@@ -1837,98 +2637,77 @@ async function dispatchChannelMessage(client, store, channel, payload, ctx) {
 
   if (channel === 'Email') {
     const fromFallback = env.RESEND_FROM || env.SMTP_FROM || env.SMTP_USER || store.settings.agencyEmail || 'Rivvak Media <connect@rivvak.com>';
-    if (env.RESEND_API_KEY) {
-      const resp = await fetchImpl('https://api.resend.com/emails', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${env.RESEND_API_KEY}`,
-          'Content-Type': 'application/json',
+    const emailOut = await sendTransactionalEmail(
+      {
+        to: payload.to,
+        subject: payload.subject || `Message from ${client.business}`,
+        text: payload.body,
+        html: payload.html,
+        from: fromFallback,
+        replyTo: payload.replyTo,
+      },
+      ctx
+    );
+
+    if (!emailOut.ok) {
+      return {
+        statusCode: emailOut.statusCode || 502,
+        result: {
+          ok: false,
+          mode: emailOut.mode,
+          ...(emailOut.status ? { status: emailOut.status } : {}),
+          error: emailOut.error,
         },
-        body: JSON.stringify({
-          from: fromFallback,
-          to: [payload.to],
-          subject: payload.subject || `Message from ${client.business}`,
-          text: payload.body,
-          ...(payload.html ? { html: payload.html } : {}),
-        }),
-      });
-      const data = await resp.json().catch(() => ({}));
-      if (!resp.ok) {
-        return {
-          statusCode: 502,
-          result: { ok: false, mode: 'resend_error', status: resp.status, error: data.message || 'Resend API error' },
-        };
-      }
+      };
+    }
+
+    if (emailOut.mode === 'live_resend') {
       const { thread, msg } = appendInboxMessage(client, {
         threadId: payload.threadId,
         channel: 'Email',
         contactName: payload.contactName || payload.to,
         contactEmail: payload.to,
-        sender: fromFallback,
+        sender: emailOut.fromUsed,
         subject: payload.subject,
         body: payload.body,
         direction: 'outbound',
         deliveryMode: 'live_resend',
-        sid: data.id,
+        sid: emailOut.id,
       });
       return {
         statusCode: 200,
-        result: { ok: true, mode: 'live_resend', id: data.id, threadId: thread.id, messageId: msg.id, webhookResult },
+        result: { ok: true, mode: 'live_resend', id: emailOut.id, threadId: thread.id, messageId: msg.id, webhookResult },
       };
     }
 
-    if (env.SMTP_HOST && env.SMTP_USER && env.SMTP_PASS) {
-      const smtpHost = env.SMTP_HOST;
-      const smtpPort = Number(env.SMTP_PORT || 465);
-      const isLoopbackPlain =
-        env.SMTP_PLAIN === 'true' && (smtpHost === '127.0.0.1' || smtpHost === 'localhost');
-      const smtpSender = env.SMTP_FROM || env.RESEND_FROM || env.SMTP_USER;
-      const sendFn = ctx.smtpSendImpl || sendSmtpEmail;
-      try {
-        const smtpRes = await sendFn({
-          host: smtpHost,
-          port: smtpPort,
-          user: env.SMTP_USER,
-          pass: env.SMTP_PASS,
-          from: smtpSender,
-          to: payload.to,
-          subject: payload.subject || `Message from ${client.business}`,
-          text: payload.body,
-          plain: isLoopbackPlain,
-        });
-        const { thread, msg } = appendInboxMessage(client, {
-          threadId: payload.threadId,
-          channel: 'Email',
-          contactName: payload.contactName || payload.to,
-          contactEmail: payload.to,
-          sender: smtpSender,
-          subject: payload.subject,
-          body: payload.body,
-          direction: 'outbound',
-          deliveryMode: 'live_smtp',
-          sid: smtpRes.messageId,
-        });
-        return {
-          statusCode: 200,
-          result: {
-            ok: true,
-            mode: 'live_smtp',
-            messageId: smtpRes.messageId,
-            inboxMessageId: msg.id,
-            threadId: thread.id,
-            response: smtpRes.response,
-            webhookResult,
-          },
-        };
-      } catch (err) {
-        return {
-          statusCode: 502,
-          result: { ok: false, mode: 'smtp_error', error: err.message || 'SMTP delivery failed' },
-        };
-      }
+    if (emailOut.mode === 'live_smtp') {
+      const { thread, msg } = appendInboxMessage(client, {
+        threadId: payload.threadId,
+        channel: 'Email',
+        contactName: payload.contactName || payload.to,
+        contactEmail: payload.to,
+        sender: emailOut.fromUsed,
+        subject: payload.subject,
+        body: payload.body,
+        direction: 'outbound',
+        deliveryMode: 'live_smtp',
+        sid: emailOut.messageId,
+      });
+      return {
+        statusCode: 200,
+        result: {
+          ok: true,
+          mode: 'live_smtp',
+          messageId: emailOut.messageId,
+          inboxMessageId: msg.id,
+          threadId: thread.id,
+          response: emailOut.response,
+          webhookResult,
+        },
+      };
     }
 
-    const missingEnv = ['RESEND_API_KEY or SMTP_*'];
+    const missingEnv = emailOut.missingEnv || ['RESEND_API_KEY or SMTP_*'];
     const { thread, msg } = appendInboxMessage(client, {
       threadId: payload.threadId,
       channel: 'Email',
@@ -2356,6 +3135,61 @@ async function runSchedulerTick(clientSlugOrOpts = null, maybeOpts = {}) {
         results.push({ clientSlug: client.slug, category: 'scheduled_post', key, log });
       }
     }
+
+    // 5. 3-Day-Ahead Retainer / Renewal Reminders
+    const renewalDateRaw =
+      client.retainerDueAt ||
+      client.renewalDate ||
+      client.billing?.nextBillingAt ||
+      client.billing?.renewalAt ||
+      client.billing?.currentPeriodEnd ||
+      '';
+    if (renewalDateRaw && client.billing?.status !== 'canceled') {
+      const dueDayMs = toDayStartMs(renewalDateRaw);
+      const todayDayMs = toDayStartMs(todayYYYYMMDD);
+      if (Number.isFinite(dueDayMs) && Number.isFinite(todayDayMs)) {
+        const daysUntil = Math.round((dueDayMs - todayDayMs) / 86400000);
+        if (daysUntil >= 0 && daysUntil <= 3) {
+          const dueKeyDate = String(renewalDateRaw).slice(0, 10);
+          const key = `retainer_renewal:${client.slug}:${dueKeyDate}`;
+          if (!client.processedScheduleKeys[key]) {
+            const reminderChannel = client.email ? 'Email' : client.phone ? 'SMS' : 'Email';
+            const retainerAmount = client.retainerAmount || client.billing?.retainerAmount || '';
+            const reminderText = `Heads up ${client.owner || client.business}: your Rivvak Media monthly growth retainer${
+              retainerAmount ? ` (${retainerAmount})` : ''
+            } renews in ${daysUntil} day${daysUntil === 1 ? '' : 's'} (${dueKeyDate}). Reply anytime with questions or campaign updates.`;
+            const log = await executeWorkflow(
+              client,
+              store,
+              {
+                workflow: {
+                  id: 'wf_retainer_renewal_3d',
+                  name: '3-Day-Ahead Retainer / Renewal Reminder',
+                  channel: reminderChannel,
+                  template: reminderText,
+                },
+                contact: {
+                  name: client.owner || client.business,
+                  email: client.email || '',
+                  phone: client.phone || '',
+                },
+                payload: {
+                  channel: reminderChannel,
+                  subject: `Rivvak Media Retainer Renewal Reminder (${dueKeyDate})`,
+                  message: reminderText,
+                  dueDate: dueKeyDate,
+                  daysUntil,
+                },
+              },
+              { env, fetchImpl, smtpSendImpl: options.smtpSendImpl }
+            );
+            client.processedScheduleKeys[key] = nowIso;
+            dirty = true;
+            results.push({ clientSlug: client.slug, category: 'retainer_renewal_3d', key, log });
+          }
+        }
+      }
+    }
   }
 
   if (dirty && !options.store) {
@@ -2417,12 +3251,46 @@ function createServer(options = {}) {
   const storePath = resolveStorePath(options);
   const adminPasscode = options.adminPasscode || env.ADMIN_PASSCODE || 'RIVVAK-2026';
   const metaVerifyToken = options.metaVerifyToken || env.META_VERIFY_TOKEN || 'rivvak-meta-verify-2026';
+  const serverStartedAtMs = Date.now();
+  const leadRateWindowMs = Number(options.leadRateWindowMs || LEAD_RATE_WINDOW_MS);
+  const leadRateMax = Number(options.leadRateMaxRequests || LEAD_RATE_MAX_REQUESTS);
+  const leadRateLimiter = new Map();
+
+  const getClientIp = (req) => {
+    const xff = req.headers['x-forwarded-for'];
+    if (typeof xff === 'string' && xff.trim()) {
+      return xff.split(',')[0].trim();
+    }
+    return req.socket?.remoteAddress || 'unknown';
+  };
+
+  const checkLeadRateLimit = (ip) => {
+    const nowMs = Date.now();
+    const prev = leadRateLimiter.get(ip) || [];
+    const recent = prev.filter((ts) => nowMs - ts < leadRateWindowMs);
+    if (recent.length >= leadRateMax) {
+      leadRateLimiter.set(ip, recent);
+      const retryAfterSec = Math.max(1, Math.ceil((recent[0] + leadRateWindowMs - nowMs) / 1000));
+      return { allowed: false, retryAfterSec };
+    }
+    recent.push(nowMs);
+    leadRateLimiter.set(ip, recent);
+    if (leadRateLimiter.size > 2000) {
+      for (const [k, list] of leadRateLimiter.entries()) {
+        if (!list.some((ts) => nowMs - ts < leadRateWindowMs)) {
+          leadRateLimiter.delete(k);
+        }
+      }
+    }
+    return { allowed: true };
+  };
 
   // Ensure store file exists at server creation
   loadStore(storePath, env);
 
   const server = http.createServer(async (req, res) => {
     try {
+      applySecurityHeaders(res);
       const corsRejected = applyCors(req, res, env);
       if (req.method === 'OPTIONS') {
         if (corsRejected) {
@@ -2441,13 +3309,407 @@ function createServer(options = {}) {
       const store = loadStore(storePath, env);
 
       // --- Public Routes ---
+      if (method === 'GET' && pathname === '/') {
+        const uptimeSeconds = Math.max(0, Math.floor((Date.now() - serverStartedAtMs) / 1000));
+        const clientsCount = Object.keys(store.clients || {}).length;
+        const publicLeadsCount = Array.isArray(store.publicLeads) ? store.publicLeads.length : 0;
+        const smtpConfigured = isSmtpConfigured(env);
+        const acceptHeader = String(req.headers.accept || '').toLowerCase();
+        if (acceptHeader.includes('text/html') && queryParams.format !== 'json') {
+          sendHtml(
+            res,
+            200,
+            renderStatusDashboardHtml({
+              uptimeSeconds,
+              clientsCount,
+              publicLeadsCount,
+              smtpConfigured,
+            })
+          );
+          return;
+        }
+        sendJson(res, 200, {
+          ok: true,
+          service: SERVICE_NAME,
+          brand: BRAND_NAME,
+          version: SERVICE_VERSION,
+          status: 'online',
+          uptimeSeconds,
+          clients: clientsCount,
+          publicLeadsCount,
+          smtpConfigured,
+          endpoints: {
+            health: '/api/health',
+            publicLead: '/api/public/lead',
+            state: '/api/state',
+            adminClients: '/api/admin/clients',
+            adminLeads: '/api/admin/leads',
+            adminEmailInbox: '/api/admin/email-inbox',
+            adminBackup: '/api/admin/backup',
+            adminRestore: '/api/admin/restore',
+            stripeWebhook: '/webhooks/stripe',
+            overlay: '/overlay.js',
+          },
+          timestamp: new Date().toISOString(),
+        });
+        return;
+      }
+
+      if (method === 'GET' && (pathname === '/overlay.js' || pathname === '/api/client/carleen-ligozio/overlay.js')) {
+        const scriptCandidate = path.join(__dirname, 'carleen-overlay.js');
+        if (fs.existsSync(scriptCandidate)) {
+          const content = fs.readFileSync(scriptCandidate, 'utf8');
+          res.writeHead(200, {
+            'Content-Type': 'application/javascript; charset=utf-8',
+            'Access-Control-Allow-Origin': '*',
+            'Cache-Control': 'public, max-age=300'
+          });
+          return res.end(content);
+        }
+      }
+
       if (method === 'GET' && pathname === '/api/health') {
         sendJson(res, 200, {
           ok: true,
-          service: 'rivvak-automation-backend',
-          version: '1.0.0',
-          clients: Object.keys(store.clients).length,
+          service: SERVICE_NAME,
+          brand: BRAND_NAME,
+          version: SERVICE_VERSION,
+          clients: Object.keys(store.clients || {}).length,
+          publicLeads: Array.isArray(store.publicLeads) ? store.publicLeads.length : 0,
+          smtpConfigured: isSmtpConfigured(env),
+          uptimeSeconds: Math.max(0, Math.floor((Date.now() - serverStartedAtMs) / 1000)),
           timestamp: new Date().toISOString(),
+        });
+        return;
+      }
+
+      // Public Website & Chat Lead Intake (POST /api/public/lead)
+      if (method === 'POST' && pathname === '/api/public/lead') {
+        const rateStatus = checkLeadRateLimit(getClientIp(req));
+        if (!rateStatus.allowed) {
+          sendJson(
+            res,
+            429,
+            {
+              ok: false,
+              error: 'Too Many Requests',
+              message: 'Submission rate limit reached. Please wait a few minutes and try again.',
+            },
+            { 'Retry-After': String(rateStatus.retryAfterSec) }
+          );
+          return;
+        }
+
+        const { data } = await readRequestBody(req);
+        const hpValue = String(data._hp ?? data.honeypot ?? '').trim();
+        if (hpValue.length > 0) {
+          sendJson(res, 200, { ok: true, ignored: true });
+          return;
+        }
+
+        const cap = (v, maxLen) =>
+          String(v ?? '')
+            .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
+            .trim()
+            .slice(0, maxLen);
+
+        const cleanName = cap(data.name ?? data['contact[name]'], 120);
+        const cleanBusiness = cap(data.business ?? data.company ?? data['contact[business]'], 160);
+        const cleanEmail = cap(data.email ?? data['contact[email]'], 180);
+        const cleanPhone = cap(data.phone ?? data['contact[phone]'], 40);
+        const cleanWebsite = cap(data.website ?? data['contact[website]'], 300);
+        const cleanLocation = cap(data.location ?? data['contact[location]'], 160);
+        const cleanIndustry = cap(data.industry ?? data['contact[industry]'], 100);
+        const cleanScope = cap(data.scope ?? data['contact[scope]'], 600);
+        const cleanEstimatedSetup = cap(data.estimatedSetup ?? data['contact[estimatedSetup]'], 40);
+        const cleanEstimatedMonthly = cap(data.estimatedMonthly ?? data['contact[estimatedMonthly]'], 40);
+        const cleanMessage = cap(data.message ?? data.body ?? data['contact[body]'], 3000);
+        const cleanSource = cap(data.source || 'website-form', 120) || 'website-form';
+        const cleanPageUrl = cap(data.pageUrl ?? data.url, 500);
+        const cleanTicketId =
+          cap(data.ticketId, 40) || `RV-${crypto.randomUUID().slice(0, 8).toUpperCase()}`;
+
+        const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+        const hasValidEmail = Boolean(cleanEmail && emailPattern.test(cleanEmail));
+        if (cleanEmail && !hasValidEmail) {
+          sendJson(res, 400, { ok: false, error: 'Please provide a valid email address.' });
+          return;
+        }
+        if (!cleanEmail && !cleanPhone && !cleanMessage && !(cleanName && cleanBusiness)) {
+          sendJson(res, 400, {
+            ok: false,
+            error: 'Please provide your email, phone number, or project message.',
+          });
+          return;
+        }
+
+        const nowIso = new Date().toISOString();
+        const leadId = `lead_${crypto.randomUUID().slice(0, 12)}`;
+        const leadRecord = {
+          id: leadId,
+          ticketId: cleanTicketId,
+          name: cleanName,
+          business: cleanBusiness,
+          email: cleanEmail,
+          phone: cleanPhone,
+          ...(cleanWebsite ? { website: cleanWebsite } : {}),
+          ...(cleanLocation ? { location: cleanLocation } : {}),
+          industry: cleanIndustry,
+          scope: cleanScope,
+          estimatedSetup: cleanEstimatedSetup,
+          estimatedMonthly: cleanEstimatedMonthly,
+          message: cleanMessage,
+          source: cleanSource,
+          pageUrl: cleanPageUrl,
+          status: 'new',
+          notes: '',
+          emailDispatched: false,
+          emailMode: 'pending',
+          autoReplySent: false,
+          createdAt: nowIso,
+          updatedAt: nowIso,
+        };
+
+        if (!Array.isArray(store.publicLeads)) store.publicLeads = [];
+        store.publicLeads.unshift(leadRecord);
+        if (store.publicLeads.length > MAX_PUBLIC_LEADS) {
+          store.publicLeads.length = MAX_PUBLIC_LEADS;
+        }
+
+        const agencyEmail = store.settings?.agencyEmail || 'connect@rivvak.com';
+        const alertLines = [
+          `New Rivvak Media Public Lead — Ref #${cleanTicketId}`,
+          `Lead ID: ${leadId}`,
+          `Name: ${cleanName || '(not provided)'}`,
+          `Business: ${cleanBusiness || '(not provided)'}`,
+          `Email: ${cleanEmail || '(not provided)'}`,
+          `Phone: ${cleanPhone || '(not provided)'}`,
+          ...(cleanWebsite ? [`Website: ${cleanWebsite}`] : []),
+          ...(cleanLocation ? [`Location: ${cleanLocation}`] : []),
+          `Industry: ${cleanIndustry || '(not specified)'}`,
+          `Scope: ${cleanScope || '(not specified)'}`,
+          `Estimated Setup: ${cleanEstimatedSetup || '(not specified)'}`,
+          `Estimated Monthly: ${cleanEstimatedMonthly || '(not specified)'}`,
+          `Source: ${cleanSource}`,
+          `Page URL: ${cleanPageUrl || '(not specified)'}`,
+          `Submitted At: ${nowIso}`,
+          '',
+          'Message / Project Notes:',
+          cleanMessage || '(no additional message)',
+        ];
+
+        let emailDispatched = false;
+        let mode = 'dry_run_queued';
+        try {
+          const alertRes = await sendTransactionalEmail(
+            {
+              to: agencyEmail,
+              subject: `[Rivvak Lead #${cleanTicketId}] ${cleanBusiness || cleanName || cleanEmail || 'New Inquiry'}`,
+              text: alertLines.join('\n'),
+              replyTo: hasValidEmail ? cleanEmail : undefined,
+            },
+            { env, fetchImpl, smtpSendImpl }
+          );
+          if (alertRes.ok && (alertRes.mode === 'live_resend' || alertRes.mode === 'live_smtp')) {
+            emailDispatched = true;
+            mode = alertRes.mode;
+          } else if (!alertRes.ok) {
+            emailDispatched = false;
+            mode = alertRes.mode || 'email_error';
+          } else {
+            emailDispatched = false;
+            mode = 'dry_run_queued';
+          }
+        } catch (_) {
+          emailDispatched = false;
+          mode = 'email_error';
+        }
+
+        leadRecord.emailDispatched = emailDispatched;
+        leadRecord.emailMode = mode;
+
+        if (hasValidEmail && env.AUTO_REPLY_LEADS !== 'false' && isLiveEmailConfigured(env) && emailDispatched) {
+          try {
+            const greetingName = cleanName || cleanBusiness || 'there';
+            const receiptLines = [
+              `Hi ${greetingName},`,
+              '',
+              `Thanks for reaching out to Rivvak Media! We received your project request (Ref #${cleanTicketId}).`,
+              ...(cleanScope ? [`Selected Scope: ${cleanScope}`] : []),
+              ...(cleanEstimatedSetup
+                ? [
+                    `Estimated Setup: ${cleanEstimatedSetup}${
+                      cleanEstimatedMonthly ? ` | Optional Retainer: ${cleanEstimatedMonthly}` : ''
+                    }`,
+                  ]
+                : []),
+              '',
+              'What happens next:',
+              '- Mason Pilger & Aiden Strompf are reviewing your notes and existing site.',
+              '- You can expect a response shortly with your 72-hour free staging preview timeline.',
+              '',
+              'Questions in the meantime? Reply directly to connect@rivvak.com or visit https://rivvak.com/.',
+              '',
+              '— Rivvak Media',
+              'West Palm Beach & South Florida | https://rivvak.com/',
+            ];
+            const replyRes = await sendTransactionalEmail(
+              {
+                to: cleanEmail,
+                from: 'Rivvak Media <connect@rivvak.com>',
+                replyTo: 'connect@rivvak.com',
+                subject: `We received your Rivvak Media inquiry (Ref #${cleanTicketId})`,
+                text: receiptLines.join('\n'),
+              },
+              { env, fetchImpl, smtpSendImpl }
+            );
+            leadRecord.autoReplySent = Boolean(
+              replyRes.ok && (replyRes.mode === 'live_resend' || replyRes.mode === 'live_smtp')
+            );
+          } catch (_) {
+            leadRecord.autoReplySent = false;
+          }
+        }
+
+        saveStore(storePath, store);
+        sendJson(res, 201, {
+          ok: true,
+          leadId,
+          ticketId: cleanTicketId,
+          emailDispatched,
+          mode,
+        });
+        return;
+      }
+
+      // Stripe Webhook Receiver (POST /webhooks/stripe)
+      if (method === 'POST' && pathname === '/webhooks/stripe') {
+        const { raw, data } = await readRequestBody(req);
+        const stripeSecret = env.STRIPE_WEBHOOK_SECRET || '';
+        if (stripeSecret) {
+          const toleranceSec =
+            env.STRIPE_WEBHOOK_TOLERANCE_SEC !== undefined ? Number(env.STRIPE_WEBHOOK_TOLERANCE_SEC) : 300;
+          const sigResult = verifyStripeSignature(
+            raw,
+            req.headers['stripe-signature'],
+            stripeSecret,
+            Number.isFinite(toleranceSec) ? toleranceSec : 300
+          );
+          if (!sigResult.valid) {
+            sendJson(res, 400, { ok: false, error: 'Invalid Stripe-Signature', reason: sigResult.reason });
+            return;
+          }
+        }
+
+        const eventType = String(data.type || '');
+        const obj = (data.data && data.data.object) || data.object || {};
+        const nowIso = new Date().toISOString();
+        const eventId = String(data.id || `evt_${crypto.randomUUID().slice(0, 12)}`);
+        const candidateSlug = String(obj.metadata?.clientSlug || obj.metadata?.slug || obj.client_reference_id || '').trim();
+        const customerEmail = String(obj.customer_email || obj.customer_details?.email || '').trim().toLowerCase();
+        const customerId = String(obj.customer || '').trim();
+
+        let matchedClient = null;
+        if (candidateSlug && store.clients[candidateSlug]) {
+          matchedClient = store.clients[candidateSlug];
+        } else if (customerEmail) {
+          matchedClient =
+            Object.values(store.clients || {}).find((c) => normEmail(c.email) === customerEmail) || null;
+        } else if (customerId) {
+          matchedClient =
+            Object.values(store.clients || {}).find((c) => c.stripeCustomerId && c.stripeCustomerId === customerId) ||
+            null;
+        }
+
+        const amountCents = Number(obj.amount_paid ?? obj.amount_total ?? obj.amount_due ?? 0) || 0;
+        const currency = String(obj.currency || 'usd').toLowerCase();
+        const stripeRecord = {
+          id: eventId,
+          type: eventType,
+          handled: HANDLED_STRIPE_EVENTS.has(eventType),
+          clientSlug: matchedClient ? matchedClient.slug : null,
+          customerEmail,
+          customerId,
+          subscriptionId: String(obj.subscription || (eventType === 'customer.subscription.deleted' ? obj.id || '' : '')),
+          amountCents,
+          currency,
+          status: String(obj.payment_status || obj.status || ''),
+          verified: Boolean(stripeSecret),
+          receivedAt: nowIso,
+        };
+
+        if (!Array.isArray(store.stripeEvents)) store.stripeEvents = [];
+        store.stripeEvents.unshift(stripeRecord);
+        if (store.stripeEvents.length > MAX_STRIPE_EVENTS) {
+          store.stripeEvents.length = MAX_STRIPE_EVENTS;
+        }
+
+        if (matchedClient && HANDLED_STRIPE_EVENTS.has(eventType)) {
+          if (!matchedClient.billing || typeof matchedClient.billing !== 'object') {
+            matchedClient.billing = {};
+          }
+          if (!Array.isArray(matchedClient.paymentRecords)) {
+            matchedClient.paymentRecords = [];
+          }
+          if (!Array.isArray(matchedClient.executionLogs)) {
+            matchedClient.executionLogs = [];
+          }
+
+          if (customerId) matchedClient.stripeCustomerId = customerId;
+          if (stripeRecord.subscriptionId) matchedClient.billing.subscriptionId = stripeRecord.subscriptionId;
+
+          if (eventType === 'checkout.session.completed') {
+            matchedClient.billing.status = 'active';
+            matchedClient.billing.lastPaymentAt = nowIso;
+            matchedClient.billing.lastEventType = eventType;
+          } else if (eventType === 'invoice.paid') {
+            matchedClient.billing.status = 'active';
+            matchedClient.billing.lastPaidAt = nowIso;
+            matchedClient.billing.lastAmountCents = amountCents;
+            matchedClient.billing.lastEventType = eventType;
+          } else if (eventType === 'invoice.payment_failed') {
+            matchedClient.billing.status = 'past_due';
+            matchedClient.billing.lastFailedAt = nowIso;
+            matchedClient.billing.lastEventType = eventType;
+          } else if (eventType === 'customer.subscription.deleted') {
+            matchedClient.billing.status = 'canceled';
+            matchedClient.billing.canceledAt = nowIso;
+            matchedClient.billing.lastEventType = eventType;
+          }
+
+          matchedClient.paymentRecords.unshift({
+            eventId,
+            type: eventType,
+            amountCents,
+            currency,
+            billingStatus: matchedClient.billing.status,
+            recordedAt: nowIso,
+          });
+          if (matchedClient.paymentRecords.length > 100) {
+            matchedClient.paymentRecords.length = 100;
+          }
+
+          matchedClient.executionLogs.push({
+            id: `log_${crypto.randomUUID().slice(0, 8)}`,
+            workflowId: 'stripe_webhook',
+            workflowName: `Stripe Event: ${eventType}`,
+            channel: 'Stripe',
+            to: customerEmail || matchedClient.slug,
+            message: `${eventType} (${(amountCents / 100).toFixed(2)} ${currency.toUpperCase()}) -> status ${matchedClient.billing.status}`,
+            mode: stripeSecret ? 'verified_stripe' : 'unverified_stripe',
+            missingEnv: stripeSecret ? [] : ['STRIPE_WEBHOOK_SECRET'],
+            ranAt: nowIso,
+          });
+        }
+
+        saveStore(storePath, store);
+        sendJson(res, 200, {
+          ok: true,
+          received: true,
+          eventId,
+          type: eventType,
+          handled: HANDLED_STRIPE_EVENTS.has(eventType),
+          clientSlug: matchedClient ? matchedClient.slug : null,
         });
         return;
       }
@@ -2721,9 +3983,130 @@ function createServer(options = {}) {
             now: data.now,
             env,
             fetchImpl,
+            smtpSendImpl,
           });
           if (tickRes.processedCount > 0) saveStore(storePath, store);
           sendJson(res, 200, tickRes);
+          return;
+        }
+
+        if (method === 'GET' && pathname === '/api/admin/leads') {
+          const leads = Array.isArray(store.publicLeads) ? store.publicLeads : [];
+          const statusFilter = queryParams.status ? String(queryParams.status).trim().toLowerCase() : '';
+          const filtered = statusFilter ? leads.filter((l) => String(l.status || '').toLowerCase() === statusFilter) : leads;
+          sendJson(res, 200, { ok: true, total: filtered.length, leads: filtered });
+          return;
+        }
+
+        const adminLeadMatch = pathname.match(/^\/api\/admin\/leads\/([a-zA-Z0-9_-]+)$/);
+        if (adminLeadMatch && method === 'PATCH') {
+          const leadId = adminLeadMatch[1];
+          const leads = Array.isArray(store.publicLeads) ? store.publicLeads : [];
+          const lead = leads.find((l) => l.id === leadId || l.ticketId === leadId);
+          if (!lead) {
+            sendJson(res, 404, { ok: false, error: 'Lead not found' });
+            return;
+          }
+          const { data } = await readRequestBody(req);
+          if (data.status !== undefined) {
+            const nextStatus = String(data.status).trim().toLowerCase();
+            if (!VALID_LEAD_STATUSES.has(nextStatus)) {
+              sendJson(res, 400, {
+                ok: false,
+                error: 'Invalid status. Allowed values: new, contacted, qualified, won, archived',
+              });
+              return;
+            }
+            lead.status = nextStatus;
+          }
+          if (data.notes !== undefined) {
+            lead.notes = String(data.notes ?? '').trim().slice(0, 3000);
+          }
+          lead.updatedAt = new Date().toISOString();
+          saveStore(storePath, store);
+          sendJson(res, 200, { ok: true, lead });
+          return;
+        }
+
+        if (method === 'GET' && pathname === '/api/admin/email-inbox') {
+          const imapHost = env.IMAP_HOST || env.SMTP_HOST || '';
+          const imapPort = Number(env.IMAP_PORT || 993);
+          const imapUser = env.IMAP_USER || env.SMTP_USER || '';
+          const imapPass = env.IMAP_PASS || env.SMTP_PASS || '';
+          const limit = queryParams.limit ? Number(queryParams.limit) : 12;
+          if (!imapHost || !imapUser || !imapPass) {
+            sendJson(res, 200, {
+              ok: true,
+              mode: 'dry_run_unconfigured',
+              messages: [],
+            });
+            return;
+          }
+          const isLoopbackPlain =
+            env.IMAP_PLAIN === 'true' && (imapHost === '127.0.0.1' || imapHost === 'localhost');
+          try {
+            const summary = await fetchImapInboxSummary({
+              host: imapHost,
+              port: imapPort,
+              user: imapUser,
+              pass: imapPass,
+              limit,
+              timeoutMs: 8000,
+              plain: isLoopbackPlain,
+              tlsOptions: options.imapTlsOptions,
+              connectFn: options.imapConnectFn,
+            });
+            sendJson(res, 200, summary);
+          } catch (err) {
+            sendJson(res, 502, {
+              ok: false,
+              mode: 'imap_error',
+              error: err.message || 'IMAP fetch failed',
+              messages: [],
+            });
+          }
+          return;
+        }
+
+        if (method === 'GET' && pathname === '/api/admin/backup') {
+          const backupJson = JSON.stringify(store, null, 2);
+          res.writeHead(200, {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Content-Disposition': 'attachment; filename="rivvak-store-backup.json"',
+            'Content-Length': Buffer.byteLength(backupJson),
+          });
+          res.end(backupJson);
+          return;
+        }
+
+        if (method === 'POST' && pathname === '/api/admin/restore') {
+          const { data } = await readRequestBody(req);
+          const candidate =
+            data && typeof data === 'object' && !Array.isArray(data) && data.clients !== undefined
+              ? data
+              : data?.store && typeof data.store === 'object' && !Array.isArray(data.store)
+              ? data.store
+              : null;
+
+          if (
+            !candidate ||
+            !candidate.clients ||
+            typeof candidate.clients !== 'object' ||
+            Array.isArray(candidate.clients) ||
+            !Object.values(candidate.clients).every((c) => c && typeof c === 'object' && !Array.isArray(c))
+          ) {
+            sendJson(res, 400, { ok: false, error: 'Invalid restore payload: clients object is required.' });
+            return;
+          }
+
+          const restoredStore = normalizeStoreShape(JSON.parse(JSON.stringify(candidate)), env);
+          saveStore(storePath, restoredStore);
+          sendJson(res, 200, {
+            ok: true,
+            restoredClients: Object.keys(restoredStore.clients).length,
+            publicLeadsCount: Array.isArray(restoredStore.publicLeads) ? restoredStore.publicLeads.length : 0,
+            updatedAt: restoredStore.updatedAt,
+          });
           return;
         }
 
@@ -2899,6 +4282,7 @@ function createServer(options = {}) {
             now: data.now,
             env,
             fetchImpl,
+            smtpSendImpl,
           });
           if (tickRes.processedCount > 0) saveStore(storePath, store);
           sendJson(res, 200, tickRes);
@@ -2979,6 +4363,9 @@ function startServer(options = {}) {
         clearInterval(timer);
         timer = null;
       }
+      if (typeof server.closeIdleConnections === 'function') {
+        server.closeIdleConnections();
+      }
       server.close(() => resolve());
     });
 
@@ -3009,13 +4396,25 @@ if (require.main === module) {
   const host = process.env.HOST || '0.0.0.0';
   startServer({ host }).then((instance) => {
     console.log(
-      `[rivvak-automation-backend] Listening on ${instance.url} (store: ${instance.storePath})`
+      `[rivvak-automation-backend] Listening on ${instance.url} (store: ${instance.storePath}, version: ${SERVICE_VERSION})`
     );
-    const shutdown = () => {
-      instance.stop().then(() => process.exit(0));
+    let shuttingDown = false;
+    const shutdown = (signal) => {
+      if (shuttingDown) return;
+      shuttingDown = true;
+      console.log(`[rivvak-automation-backend] Received ${signal}, shutting down gracefully...`);
+      const forceTimer = setTimeout(() => process.exit(1), 5000);
+      if (typeof forceTimer.unref === 'function') forceTimer.unref();
+      instance
+        .stop()
+        .then(() => {
+          clearTimeout(forceTimer);
+          process.exit(0);
+        })
+        .catch(() => process.exit(1));
     };
-    process.on('SIGINT', shutdown);
-    process.on('SIGTERM', shutdown);
+    process.on('SIGINT', () => shutdown('SIGINT'));
+    process.on('SIGTERM', () => shutdown('SIGTERM'));
   });
 }
 
@@ -3030,6 +4429,9 @@ module.exports = {
   resolveStorePath,
   sendSmtpEmail,
   verifySmtpAuth,
+  fetchImapInboxSummary,
+  verifyStripeSignature,
+  safeEqualToken,
   loadDotEnv,
   parseDotEnvFile,
 };

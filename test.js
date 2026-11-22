@@ -7,13 +7,75 @@
  */
 
 const assert = require('assert');
+const crypto = require('crypto');
 const fs = require('fs');
 const http = require('http');
 const net = require('net');
 const os = require('os');
 const path = require('path');
 
-const { startServer, parseCsv, runSchedulerTick, sendSmtpEmail, verifySmtpAuth, parseDotEnvFile } = require('./server');
+const {
+  startServer,
+  parseCsv,
+  runSchedulerTick,
+  sendSmtpEmail,
+  verifySmtpAuth,
+  fetchImapInboxSummary,
+  loadStore,
+  saveStore,
+  safeEqualToken,
+  parseDotEnvFile,
+} = require('./server');
+
+/**
+ * Spin up an ephemeral loopback mock IMAP4rev1 server for header summary verification.
+ */
+function createMockImapServer() {
+  const server = net.createServer((socket) => {
+    let buf = '';
+    socket.write('* OK [CAPABILITY IMAP4rev1] mock.rivvak.local IMAP4rev1 ready\r\n');
+
+    socket.on('data', (chunk) => {
+      buf += chunk.toString('utf8');
+      let nl;
+      while ((nl = buf.indexOf('\n')) !== -1) {
+        const line = buf.slice(0, nl).replace(/\r$/, '');
+        buf = buf.slice(nl + 1);
+        const spaceIdx = line.indexOf(' ');
+        if (spaceIdx === -1) continue;
+        const tag = line.slice(0, spaceIdx);
+        const cmd = line.slice(spaceIdx + 1);
+        const upper = cmd.toUpperCase();
+
+        if (upper.startsWith('LOGIN ')) {
+          socket.write(`${tag} OK Logged in\r\n`);
+        } else if (upper.startsWith('EXAMINE ')) {
+          socket.write('* FLAGS (\\Seen \\Answered)\r\n* 2 EXISTS\r\n* 0 RECENT\r\n');
+          socket.write(`${tag} OK [READ-ONLY] Examine completed\r\n`);
+        } else if (upper.startsWith('FETCH ')) {
+          const h1 =
+            'Date: Sat, 21 Nov 2026 10:00:00 -0500\r\nFrom: Jaime <info@bluediamondpools.com>\r\nSubject: Blue Diamond Pools Preview\r\n\r\n';
+          const h2 =
+            'Date: Sat, 21 Nov 2026 12:30:00 -0500\r\nFrom: =?UTF-8?B?Uml2dmFr?= <connect@rivvak.com>\r\nSubject: Case Update\r\n\r\n';
+          socket.write(
+            `* 1 FETCH (UID 101 FLAGS (\\Seen) BODY[HEADER.FIELDS (DATE FROM SUBJECT)] {${Buffer.byteLength(h1)}}\r\n${h1})\r\n`
+          );
+          socket.write(
+            `* 2 FETCH (UID 102 FLAGS () BODY[HEADER.FIELDS (DATE FROM SUBJECT)] {${Buffer.byteLength(h2)}}\r\n${h2})\r\n`
+          );
+          socket.write(`${tag} OK Fetch completed\r\n`);
+        } else if (upper === 'LOGOUT') {
+          socket.write('* BYE IMAP4rev1 Server logging out\r\n');
+          socket.write(`${tag} OK Logout completed\r\n`);
+          socket.end();
+        } else {
+          socket.write(`${tag} OK Done\r\n`);
+        }
+      }
+    });
+  });
+  return server;
+}
 
 /**
  * Spin up an ephemeral loopback mock SMTP server validating AUTH LOGIN & DATA framing.
@@ -668,6 +730,463 @@ async function runTests() {
         assert.strictEqual(authRes.authenticated, true);
         assert.strictEqual(authRes.host, 'mail.privateemail.com');
         assert.strictEqual(authRes.port, 465);
+      }),
+
+      check('15. GET / HTML dashboard & JSON status, upgraded /api/health, security headers, zero "Rivvak Digital"', async () => {
+        const serverSource = fs.readFileSync(path.join(__dirname, 'server.js'), 'utf8');
+        assert.strictEqual(/Rivvak Digital/i.test(serverSource), false, 'server.js must not contain Rivvak Digital');
+
+        const rootHtml = await jsonReq(baseUrl, '/', {
+          headers: { Accept: 'text/html,application/xhtml+xml' },
+        });
+        assert.strictEqual(rootHtml.status, 200);
+        assert.ok(rootHtml.headers.get('content-type').includes('text/html'));
+        assert.ok(rootHtml.raw.includes('#09090B'));
+        assert.ok(rootHtml.raw.includes('Rivvak Media — Cloud Automation Engine'));
+        assert.ok(rootHtml.raw.includes('ONLINE'));
+        assert.ok(rootHtml.raw.includes('2.0.0'));
+        assert.ok(rootHtml.raw.includes('Dry-Run'));
+        assert.ok(rootHtml.raw.includes('/api/health'));
+        assert.ok(rootHtml.raw.includes('https://rivvak.com/'));
+        assert.strictEqual(/Rivvak Digital/i.test(rootHtml.raw), false);
+        assert.strictEqual(rootHtml.headers.get('x-content-type-options'), 'nosniff');
+        assert.strictEqual(rootHtml.headers.get('referrer-policy'), 'strict-origin-when-cross-origin');
+        assert.strictEqual(rootHtml.headers.get('x-frame-options'), 'DENY');
+
+        const rootJson = await jsonReq(baseUrl, '/', {
+          headers: { Accept: 'application/json' },
+        });
+        assert.strictEqual(rootJson.status, 200);
+        assert.strictEqual(rootJson.data.ok, true);
+        assert.strictEqual(rootJson.data.service, 'rivvak-automation-backend');
+        assert.strictEqual(rootJson.data.brand, 'Rivvak Media');
+        assert.strictEqual(rootJson.data.version, '2.0.0');
+        assert.strictEqual(rootJson.data.status, 'online');
+        assert.strictEqual(typeof rootJson.data.uptimeSeconds, 'number');
+        assert.strictEqual(rootJson.data.clients, 2);
+        assert.strictEqual(rootJson.data.publicLeadsCount, 1);
+        assert.strictEqual(rootJson.data.smtpConfigured, false);
+        assert.ok(rootJson.data.endpoints && rootJson.data.endpoints.health === '/api/health');
+
+        const rootForceJson = await jsonReq(baseUrl, '/?format=json', {
+          headers: { Accept: 'text/html' },
+        });
+        assert.strictEqual(rootForceJson.status, 200);
+        assert.strictEqual(rootForceJson.data.version, '2.0.0');
+
+        const health = await jsonReq(baseUrl, '/api/health');
+        assert.strictEqual(health.status, 200);
+        assert.strictEqual(health.data.brand, 'Rivvak Media');
+        assert.strictEqual(health.data.version, '2.0.0');
+        assert.strictEqual(health.data.publicLeads, 1);
+        assert.strictEqual(health.data.smtpConfigured, false);
+        assert.strictEqual(typeof health.data.uptimeSeconds, 'number');
+      }),
+
+      check('16. POST /api/public/lead (happy path + mock SMTP alert & 72h auto-reply + honeypot + 429 rate limit)', async () => {
+        const mockSmtp = createMockSmtpServer();
+        await new Promise((resolve) => mockSmtp.server.listen(0, '127.0.0.1', resolve));
+        const smtpPort = mockSmtp.server.address().port;
+        const leadTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rivvak-lead-test-'));
+        let leadServer = null;
+
+        try {
+          leadServer = await startServer({
+            port: 0,
+            host: '127.0.0.1',
+            dataDir: leadTmpDir,
+            enableScheduler: false,
+            loadEnv: false,
+            env: {
+              ADMIN_PASSCODE: 'RIVVAK-2026',
+              SMTP_HOST: '127.0.0.1',
+              SMTP_PORT: String(smtpPort),
+              SMTP_USER: 'connect@rivvak.com',
+              SMTP_PASS: 'mock-smtp-pass',
+              SMTP_FROM: 'Rivvak Media <connect@rivvak.com>',
+              SMTP_PLAIN: 'true',
+              AUTO_REPLY_LEADS: 'true',
+            },
+          });
+
+          const happy = await jsonReq(leadServer.url, '/api/public/lead', {
+            method: 'POST',
+            headers: { Origin: 'https://rivvak.com' },
+            body: {
+              name: 'Sam Rivera',
+              business: 'Palm Beach Marine',
+              email: 'sam@pbmarine.example',
+              phone: '(561) 555-0144',
+              industry: 'Service & Trades',
+              scope: 'Growth Build + Local SEO',
+              estimatedSetup: '$1,650',
+              estimatedMonthly: '$450/mo',
+              message: 'Need a 72-hour staging link before Friday.',
+              source: 'calculator-form',
+              pageUrl: 'https://rivvak.com/#calculator',
+              ticketId: 'RV-TEST-101',
+              _hp: '',
+            },
+          });
+          assert.strictEqual(happy.status, 201);
+          assert.strictEqual(happy.headers.get('access-control-allow-origin'), 'https://rivvak.com');
+          assert.strictEqual(happy.data.ok, true);
+          assert.ok(happy.data.leadId.startsWith('lead_'));
+          assert.strictEqual(happy.data.ticketId, 'RV-TEST-101');
+          assert.strictEqual(happy.data.emailDispatched, true);
+          assert.strictEqual(happy.data.mode, 'live_smtp');
+
+          // Agency alert + branded 72-hour receipt auto-reply
+          assert.strictEqual(mockSmtp.captured.length, 2);
+          assert.strictEqual(mockSmtp.captured[0].rcptTo[0], '<connect@rivvak.com>');
+          assert.ok(mockSmtp.captured[0].rawData.includes('Palm Beach Marine'));
+          assert.strictEqual(mockSmtp.captured[1].mailFrom, '<connect@rivvak.com>');
+          assert.strictEqual(mockSmtp.captured[1].rcptTo[0], '<sam@pbmarine.example>');
+          assert.ok(mockSmtp.captured[1].rawData.includes('Rivvak Media <connect@rivvak.com>'));
+          assert.ok(mockSmtp.captured[1].rawData.includes('72-hour'));
+
+          // Honeypot _hp silently returns 200 ignored without saving or emailing
+          const spam = await jsonReq(leadServer.url, '/api/public/lead', {
+            method: 'POST',
+            body: {
+              name: 'Spam Bot',
+              email: 'bot@spam.example',
+              message: 'Buy crypto',
+              _hp: 'http://spam.example',
+            },
+          });
+          assert.strictEqual(spam.status, 200);
+          assert.deepStrictEqual(spam.data, { ok: true, ignored: true });
+          assert.strictEqual(mockSmtp.captured.length, 2);
+
+          // Rate limit: 2 requests already used from 127.0.0.1; send 8 more valid/honeypot, then 11th -> 429
+          for (let i = 0; i < 8; i++) {
+            const okReq = await jsonReq(leadServer.url, '/api/public/lead', {
+              method: 'POST',
+              body: { _hp: 'skip', message: `burst-${i}` },
+            });
+            assert.strictEqual(okReq.status, 200);
+          }
+          const limited = await jsonReq(leadServer.url, '/api/public/lead', {
+            method: 'POST',
+            body: { name: 'Rate Limited', email: 'over@limit.example', message: 'Too fast' },
+          });
+          assert.strictEqual(limited.status, 429);
+          assert.strictEqual(limited.data.error, 'Too Many Requests');
+        } finally {
+          if (leadServer) await leadServer.stop().catch(() => {});
+          await new Promise((resolve) => mockSmtp.server.close(resolve));
+          fs.rmSync(leadTmpDir, { recursive: true, force: true });
+        }
+      }),
+
+      check('17. Admin leads GET/PATCH + seeded Blue Diamond Pools + 403 client isolation', async () => {
+        const deniedClient = await jsonReq(baseUrl, '/api/admin/leads', { token: 'CLEAN-2026' });
+        assert.strictEqual(deniedClient.status, 403);
+
+        const deniedPatch = await jsonReq(baseUrl, '/api/admin/leads/lead_blue_diamond_pools', {
+          method: 'PATCH',
+          token: 'CARLEEN-2026',
+          body: { status: 'won' },
+        });
+        assert.strictEqual(deniedPatch.status, 403);
+
+        const listRes = await jsonReq(baseUrl, '/api/admin/leads', { token: 'RIVVAK-2026' });
+        assert.strictEqual(listRes.status, 200);
+        assert.strictEqual(listRes.data.ok, true);
+        const bdp = listRes.data.leads.find((l) => l.business === 'Blue Diamond Pools');
+        assert.ok(bdp, 'Blue Diamond Pools seeded in createDefaultStore()');
+        assert.strictEqual(bdp.name, 'Jaime');
+        assert.strictEqual(bdp.website, 'https://bluediamondpools.com/');
+        assert.strictEqual(bdp.phone, '(954) 755-0777');
+        assert.strictEqual(bdp.email, 'info@bluediamondpools.com');
+        assert.strictEqual(bdp.location, 'Broward & Palm Beach County');
+        assert.strictEqual(bdp.status, 'qualified');
+        assert.strictEqual(bdp.source, 'Google Doc — Jaime Pool Company');
+
+        const badStatus = await jsonReq(baseUrl, `/api/admin/leads/${bdp.id}`, {
+          method: 'PATCH',
+          token: 'RIVVAK-2026',
+          body: { status: 'invalid-stage' },
+        });
+        assert.strictEqual(badStatus.status, 400);
+
+        const patched = await jsonReq(baseUrl, `/api/admin/leads/${bdp.id}`, {
+          method: 'PATCH',
+          token: 'RIVVAK-2026',
+          body: { status: 'contacted', notes: 'Walkthrough scheduled for Tuesday at 2pm.' },
+        });
+        assert.strictEqual(patched.status, 200);
+        assert.strictEqual(patched.data.lead.status, 'contacted');
+        assert.strictEqual(patched.data.lead.notes, 'Walkthrough scheduled for Tuesday at 2pm.');
+      }),
+
+      check('18. Admin backup & restore round-trip + atomic .bak recovery in loadStore()', async () => {
+        const bakTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rivvak-backup-test-'));
+        let bakServer = null;
+        try {
+          bakServer = await startServer({
+            port: 0,
+            host: '127.0.0.1',
+            dataDir: bakTmpDir,
+            enableScheduler: false,
+            loadEnv: false,
+            env: { ADMIN_PASSCODE: 'RIVVAK-2026' },
+          });
+
+          const denied = await jsonReq(bakServer.url, '/api/admin/backup', { token: 'CLEAN-2026' });
+          assert.strictEqual(denied.status, 403);
+
+          const backupRes = await jsonReq(bakServer.url, '/api/admin/backup', { token: 'RIVVAK-2026' });
+          assert.strictEqual(backupRes.status, 200);
+          assert.strictEqual(
+            backupRes.headers.get('content-disposition'),
+            'attachment; filename="rivvak-store-backup.json"'
+          );
+          assert.ok(backupRes.data.clients['clean-results']);
+
+          // Mutate store via a newly created client, then verify restore rolls back cleanly + writes .bak
+          await jsonReq(bakServer.url, '/api/admin/clients', {
+            method: 'POST',
+            token: 'RIVVAK-2026',
+            body: { business: 'Transient Studio', accessCode: 'TRANS-2026' },
+          });
+
+          const badRestore = await jsonReq(bakServer.url, '/api/admin/restore', {
+            method: 'POST',
+            token: 'RIVVAK-2026',
+            body: { clients: 'not-an-object' },
+          });
+          assert.strictEqual(badRestore.status, 400);
+
+          const restoreRes = await jsonReq(bakServer.url, '/api/admin/restore', {
+            method: 'POST',
+            token: 'RIVVAK-2026',
+            body: backupRes.data,
+          });
+          assert.strictEqual(restoreRes.status, 200);
+          assert.strictEqual(restoreRes.data.ok, true);
+          assert.strictEqual(restoreRes.data.restoredClients, 2);
+          assert.ok(fs.existsSync(`${bakServer.storePath}.bak`), 'Restore must preserve pre-restore .bak snapshot');
+
+          const afterSync = await jsonReq(bakServer.url, '/api/state', { token: 'RIVVAK-2026' });
+          assert.strictEqual(afterSync.data.clients['transient-studio'], undefined);
+
+          // Simulate corrupted store.json -> loadStore() recovers from .bak
+          const validSaved = loadStore(bakServer.storePath);
+          validSaved.adminState.eoyTargetClients = 9;
+          saveStore(bakServer.storePath, validSaved); // writes valid state to store.json & prior state to .bak
+          saveStore(bakServer.storePath, validSaved); // ensures .bak also holds eoyTargetClients: 9
+          fs.writeFileSync(bakServer.storePath, '{corrupted json!!!', 'utf8');
+          const recovered = loadStore(bakServer.storePath);
+          assert.strictEqual(recovered.adminState.eoyTargetClients, 9);
+        } finally {
+          if (bakServer) await bakServer.stop().catch(() => {});
+          fs.rmSync(bakTmpDir, { recursive: true, force: true });
+        }
+      }),
+
+      check('19. POST /webhooks/stripe HMAC-SHA256 verification (valid & invalid) + client payment logging', async () => {
+        const stripeTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rivvak-stripe-test-'));
+        const webhookSecret = 'whsec_test_rivvak_secret_2026';
+        let stripeServer = null;
+
+        const signStripe = (payloadObj, secretOverride = webhookSecret) => {
+          const raw = JSON.stringify(payloadObj);
+          const t = Math.floor(Date.now() / 1000);
+          const sig = crypto.createHmac('sha256', secretOverride).update(`${t}.${raw}`, 'utf8').digest('hex');
+          return { raw, sigHeader: `t=${t},v1=${sig}` };
+        };
+
+        try {
+          stripeServer = await startServer({
+            port: 0,
+            host: '127.0.0.1',
+            dataDir: stripeTmpDir,
+            enableScheduler: false,
+            loadEnv: false,
+            env: {
+              ADMIN_PASSCODE: 'RIVVAK-2026',
+              STRIPE_WEBHOOK_SECRET: webhookSecret,
+            },
+          });
+
+          const missingSig = await jsonReq(stripeServer.url, '/webhooks/stripe', {
+            method: 'POST',
+            body: { id: 'evt_bad_1', type: 'invoice.paid', data: { object: {} } },
+          });
+          assert.strictEqual(missingSig.status, 400);
+
+          const badSigPayload = signStripe(
+            { id: 'evt_bad_2', type: 'invoice.paid', data: { object: {} } },
+            'wrong_secret'
+          );
+          const badSig = await jsonReq(stripeServer.url, '/webhooks/stripe', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Stripe-Signature': badSigPayload.sigHeader },
+            body: badSigPayload.raw,
+          });
+          assert.strictEqual(badSig.status, 400);
+
+          const eventsToTest = [
+            {
+              id: 'evt_chk_1',
+              type: 'checkout.session.completed',
+              data: {
+                object: {
+                  customer: 'cus_cr_001',
+                  subscription: 'sub_cr_001',
+                  amount_total: 165000,
+                  currency: 'usd',
+                  payment_status: 'paid',
+                  metadata: { clientSlug: 'clean-results' },
+                },
+              },
+            },
+            {
+              id: 'evt_inv_paid_2',
+              type: 'invoice.paid',
+              data: {
+                object: {
+                  customer: 'cus_cr_001',
+                  amount_paid: 45000,
+                  currency: 'usd',
+                  status: 'paid',
+                  metadata: { clientSlug: 'clean-results' },
+                },
+              },
+            },
+            {
+              id: 'evt_inv_fail_3',
+              type: 'invoice.payment_failed',
+              data: {
+                object: {
+                  customer: 'cus_cr_001',
+                  amount_due: 45000,
+                  currency: 'usd',
+                  status: 'open',
+                },
+              },
+            },
+            {
+              id: 'evt_sub_del_4',
+              type: 'customer.subscription.deleted',
+              data: {
+                object: {
+                  id: 'sub_cr_001',
+                  customer: 'cus_cr_001',
+                  status: 'canceled',
+                },
+              },
+            },
+          ];
+
+          for (const ev of eventsToTest) {
+            const signed = signStripe(ev);
+            const res = await jsonReq(stripeServer.url, '/webhooks/stripe', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'Stripe-Signature': signed.sigHeader },
+              body: signed.raw,
+            });
+            assert.strictEqual(res.status, 200);
+            assert.strictEqual(res.data.ok, true);
+            assert.strictEqual(res.data.handled, true);
+            assert.strictEqual(res.data.clientSlug, 'clean-results');
+          }
+
+          const stored = loadStore(stripeServer.storePath);
+          assert.strictEqual(stored.stripeEvents.length, 4);
+          const cr = stored.clients['clean-results'];
+          assert.strictEqual(cr.billing.status, 'canceled');
+          assert.strictEqual(cr.paymentRecords.length, 4);
+          assert.ok(cr.executionLogs.some((l) => l.workflowId === 'stripe_webhook' && l.mode === 'verified_stripe'));
+        } finally {
+          if (stripeServer) await stripeServer.stop().catch(() => {});
+          fs.rmSync(stripeTmpDir, { recursive: true, force: true });
+        }
+      }),
+
+      check('20. Email-inbox dry-run + mock IMAP + constant-time auth + 3d retainer scheduler + /overlay.js', async () => {
+        // Constant-time safeEqualToken checks
+        assert.strictEqual(safeEqualToken('RIVVAK-2026', 'RIVVAK-2026'), true);
+        assert.strictEqual(safeEqualToken('RIVVAK-2026', 'RIVVAK-2027'), false);
+        assert.strictEqual(safeEqualToken('short', 'much-longer-token'), false);
+        assert.strictEqual(safeEqualToken('', ''), false);
+
+        // /overlay.js & /api/client/carleen-ligozio/overlay.js 200 JS responses
+        for (const overlayRoute of ['/overlay.js', '/api/client/carleen-ligozio/overlay.js']) {
+          const ov = await jsonReq(baseUrl, overlayRoute);
+          assert.strictEqual(ov.status, 200);
+          assert.ok(ov.headers.get('content-type').includes('application/javascript'));
+          assert.strictEqual(ov.headers.get('access-control-allow-origin'), '*');
+          assert.ok(ov.raw.includes('CARLEEN_OVERLAY'));
+        }
+
+        // Honest dry_run_unconfigured when IMAP/SMTP creds absent + 403 for client tokens
+        const clientDenied = await jsonReq(baseUrl, '/api/admin/email-inbox', { token: 'CLEAN-2026' });
+        assert.strictEqual(clientDenied.status, 403);
+
+        const dryInbox = await jsonReq(baseUrl, '/api/admin/email-inbox', { token: 'RIVVAK-2026' });
+        assert.strictEqual(dryInbox.status, 200);
+        assert.deepStrictEqual(dryInbox.data, {
+          ok: true,
+          mode: 'dry_run_unconfigured',
+          messages: [],
+        });
+
+        // Mock loopback IMAP header summary check (zero live network calls)
+        const mockImap = createMockImapServer();
+        await new Promise((resolve) => mockImap.listen(0, '127.0.0.1', resolve));
+        try {
+          const imapPort = mockImap.address().port;
+          const summary = await fetchImapInboxSummary({
+            host: '127.0.0.1',
+            port: imapPort,
+            user: 'connect@rivvak.com',
+            pass: 'unit-test-imap',
+            limit: 12,
+            timeoutMs: 8000,
+            plain: true,
+          });
+          assert.strictEqual(summary.ok, true);
+          assert.strictEqual(summary.mode, 'live_imap');
+          assert.strictEqual(summary.messages.length, 2);
+          assert.strictEqual(summary.messages[0].uid, 102);
+          assert.strictEqual(summary.messages[0].from, 'Rivvak <connect@rivvak.com>');
+          assert.strictEqual(summary.messages[0].seen, false);
+          assert.strictEqual(summary.messages[1].uid, 101);
+          assert.strictEqual(summary.messages[1].seen, true);
+        } finally {
+          await new Promise((resolve) => mockImap.close(resolve));
+        }
+
+        // 3-day-ahead retainer/renewal reminder idempotency in runSchedulerTick()
+        const schedTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rivvak-retainer-sched-'));
+        try {
+          const store = loadStore(path.join(schedTmpDir, 'store.json'), isolatedEnv);
+          store.clients['carleen-ligozio'].retainerDueAt = '2026-11-24T00:00:00.000Z';
+          store.clients['carleen-ligozio'].retainerAmount = '$850/mo';
+          saveStore(path.join(schedTmpDir, 'store.json'), store);
+
+          const t1 = await runSchedulerTick('carleen-ligozio', {
+            dataDir: schedTmpDir,
+            now: '2026-11-21T12:00:00.000Z',
+            env: isolatedEnv,
+          });
+          assert.ok(
+            t1.results.some((r) => r.category === 'retainer_renewal_3d'),
+            '3-day-ahead retainer reminder must fire'
+          );
+
+          const t2 = await runSchedulerTick('carleen-ligozio', {
+            dataDir: schedTmpDir,
+            now: '2026-11-21T12:00:00.000Z',
+            env: isolatedEnv,
+          });
+          assert.strictEqual(t2.processedCount, 0, 'Retainer reminder must be idempotent');
+        } finally {
+          fs.rmSync(schedTmpDir, { recursive: true, force: true });
+        }
       }),
     ];
 

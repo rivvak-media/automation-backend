@@ -1,0 +1,64 @@
+# Render Blueprint for Rivvak Media Cloud Automation Engine (v2.0.0)
+# Zero secrets stored here — fill secret env vars in the Render Dashboard.
+services:
+  - type: web
+    name: automation-backend
+    runtime: node
+    plan: free
+    buildCommand: node --check server.js
+    startCommand: node server.js
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: HOST
+        value: 0.0.0.0
+      - key: PORT
+        value: "8787"
+      - key: DATA_DIR
+        value: /app/data
+      - key: SCHEDULER_INTERVAL_MS
+        value: "60000"
+      - key: ADMIN_PASSCODE
+        sync: false
+      - key: ALLOWED_ORIGINS
+        value: https://rivvak.com,https://www.rivvak.com
+      - key: AUTO_REPLY_LEADS
+        value: "true"
+      - key: RESEND_API_KEY
+        sync: false
+      - key: RESEND_FROM
+        value: Rivvak Media <connect@rivvak.com>
+      - key: SMTP_HOST
+        value: mail.privateemail.com
+      - key: SMTP_PORT
+        value: "465"
+      - key: SMTP_USER
+        value: connect@rivvak.com
+      - key: SMTP_PASS
+        sync: false
+      - key: SMTP_FROM
+        value: Rivvak Media <connect@rivvak.com>
+      - key: IMAP_HOST
+        value: mail.privateemail.com
+      - key: IMAP_PORT
+        value: "993"
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TWILIO_FROM_NUMBER
+        sync: false
+      - key: META_ACCESS_TOKEN
+        sync: false
+      - key: META_IG_USER_ID
+        sync: false
+      - key: META_AD_ACCOUNT_ID
+        sync: false
+      - key: META_VERIFY_TOKEN
+        sync: false
+      - key: WEBHOOK_URL
+        sync: false
