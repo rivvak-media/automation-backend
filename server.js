@@ -14,6 +14,7 @@
  */
 
 const http = require('http');
+const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -86,6 +87,24 @@ function loadDotEnv(envPath = path.join(__dirname, '.env')) {
       process.env[key] = val;
     }
   }
+  // Also load .env.local if present (in __dirname or parent directory)
+  const localCandidates = [
+    path.join(__dirname, '.env.local'),
+    path.join(__dirname, '..', '.env.local'),
+  ];
+  for (const localPath of localCandidates) {
+    if (fs.existsSync(localPath)) {
+      const localParsed = parseDotEnvFile(localPath);
+      for (const [key, val] of Object.entries(localParsed)) {
+        if (!(key in process.env)) {
+          process.env[key] = val;
+        }
+        if (!(key in parsed)) {
+          parsed[key] = val;
+        }
+      }
+    }
+  }
   return parsed;
 }
 
@@ -119,7 +138,7 @@ function createDefaultStore(env = process.env) {
         business: 'Clean Results — House of Fitness',
         owner: 'Bobby',
         phone: '(561) 324-2189',
-        email: '',
+        email: 'connect@rivvak.com',
         location: 'West Palm Beach, FL',
         accessCode: 'CLEAN-2026',
         assignedDemos: ['/pages/demo-gym'],
@@ -229,6 +248,15 @@ function createDefaultStore(env = process.env) {
             managedBy: 'Rivvak Media',
             template:
               'Hey {{firstName}}, Bobby from Clean Results House of Fitness here! Saw you checked out our Body by Bobby program. Want to swing by this week for a quick 1-on-1 tour?',
+            smsScript:
+              'Hey {{firstName}}, Bobby from Clean Results House of Fitness here! Saw you checked out our Body by Bobby program. Want to swing by this week for a quick 1-on-1 tour?',
+            emailSubject: 'Welcome to Clean Results — House of Fitness, {{firstName}}!',
+            emailHeaders: {
+              'X-Entity-Ref-ID': 'clean-results-speed-to-lead',
+              'List-Unsubscribe': '<mailto:connect@rivvak.com?subject=unsubscribe>',
+            },
+            emailTemplate:
+              'Hey {{firstName}},\n\nBobby from Clean Results House of Fitness here in West Palm Beach! Saw you checked out our Body by Bobby program. We would love to host you for a 1-on-1 facility tour and movement assessment this week.\n\nReply directly to this email or call/text (561) 324-2189 to pick your slot.\n\n— Bobby\nClean Results House of Fitness',
             runCount: 48,
             lastRunAt: nowIso,
           },
@@ -242,6 +270,15 @@ function createDefaultStore(env = process.env) {
             managedBy: 'Rivvak Media',
             template:
               'Before we meet at Clean Results, {{firstName}}, let Bobby know if you have any prior injuries or mobility limits so we tailor your session safely.',
+            smsScript:
+              'Before we meet at Clean Results, {{firstName}}, let Bobby know if you have any prior injuries or mobility limits so we tailor your session safely.',
+            emailSubject: 'Clean Results Session Prep: Injury & Health History Intake',
+            emailHeaders: {
+              'X-Entity-Ref-ID': 'clean-results-injury-intake',
+              'List-Unsubscribe': '<mailto:connect@rivvak.com?subject=unsubscribe>',
+            },
+            emailTemplate:
+              'Hi {{firstName}},\n\nBefore we meet on the gym floor, please take a moment to reply with any prior injuries, joint surgeries, or movement limitations so Bobby and the coaching team can personalize your session safely.\n\nLooking forward to seeing you!\n\n— Clean Results Coaching Team',
             runCount: 27,
             lastRunAt: nowIso,
           },
@@ -256,6 +293,15 @@ function createDefaultStore(env = process.env) {
             reminderHours: [24, 2],
             template:
               'Reminder {{firstName}}: your {{sessionType}} at Clean Results House of Fitness is coming up at {{scheduledAt}}. Reply C to confirm!',
+            smsScript:
+              'Reminder {{firstName}}: your {{sessionType}} at Clean Results House of Fitness is coming up at {{scheduledAt}}. Reply C to confirm!',
+            emailSubject: 'Confirmed: Your {{sessionType}} at Clean Results ({{scheduledAt}})',
+            emailHeaders: {
+              'X-Entity-Ref-ID': 'clean-results-booking-reminder',
+              'List-Unsubscribe': '<mailto:connect@rivvak.com?subject=unsubscribe>',
+            },
+            emailTemplate:
+              'Hi {{firstName}},\n\nThis is a quick reminder that your {{sessionType}} at Clean Results House of Fitness is scheduled for {{scheduledAt}}.\n\nLocation: Clean Results — House of Fitness, West Palm Beach, FL\nQuestions: Call or text (561) 324-2189.\n\nSee you on the turf!',
             runCount: 64,
             lastRunAt: nowIso,
           },
@@ -270,6 +316,15 @@ function createDefaultStore(env = process.env) {
             checkpointsDays: [7, 14, 30],
             template:
               'Hey {{firstName}}, checking in from Clean Results! How is training feeling so far? Reply anytime if you want Bobby to adjust your split.',
+            smsScript:
+              'Hey {{firstName}}, checking in from Clean Results! How is training feeling so far? Reply anytime if you want Bobby to adjust your split.',
+            emailSubject: 'How is your training feeling at Clean Results, {{firstName}}?',
+            emailHeaders: {
+              'X-Entity-Ref-ID': 'clean-results-retention-checkin',
+              'List-Unsubscribe': '<mailto:connect@rivvak.com?subject=unsubscribe>',
+            },
+            emailTemplate:
+              'Hey {{firstName}},\n\nChecking in from Clean Results! How is your routine feeling? Whether you want to adjust your lifting split, dial in nutrition, or work around a tight joint, Bobby and the team are here to help.\n\nKeep crushing it,\nClean Results Team',
             runCount: 39,
             lastRunAt: nowIso,
           },
@@ -283,6 +338,15 @@ function createDefaultStore(env = process.env) {
             managedBy: 'Rivvak Media',
             template:
               'Happy Birthday {{firstName}}! From Bobby and the entire Clean Results crew — come grab a complimentary recovery shake on your next lift.',
+            smsScript:
+              'Happy Birthday {{firstName}}! From Bobby and the entire Clean Results crew — come grab a complimentary recovery shake on your next lift.',
+            emailSubject: 'Happy Birthday from Bobby & Clean Results House of Fitness!',
+            emailHeaders: {
+              'X-Entity-Ref-ID': 'clean-results-birthday',
+              'List-Unsubscribe': '<mailto:connect@rivvak.com?subject=unsubscribe>',
+            },
+            emailTemplate:
+              'Happy Birthday, {{firstName}}!\n\nFrom Bobby and the entire Clean Results family — hope you have an incredible day. Come by the gym this week for a complimentary post-workout recovery shake on us!\n\nCheers,\nBobby & Clean Results Staff',
             runCount: 19,
             lastRunAt: nowIso,
           },
@@ -296,6 +360,15 @@ function createDefaultStore(env = process.env) {
             managedBy: 'Rivvak Media',
             template:
               'Sorry we missed your call at Clean Results House of Fitness — Bobby is on the gym floor coaching. Text us here and we will get right back to you!',
+            smsScript:
+              'Sorry we missed your call at Clean Results House of Fitness — Bobby is on the gym floor coaching. Text us here and we will get right back to you!',
+            emailSubject: 'Sorry we missed your call — Clean Results House of Fitness',
+            emailHeaders: {
+              'X-Entity-Ref-ID': 'clean-results-missed-call',
+              'List-Unsubscribe': '<mailto:connect@rivvak.com?subject=unsubscribe>',
+            },
+            emailTemplate:
+              'Hi {{firstName}},\n\nSorry we missed your call! Bobby is currently on the gym floor working 1-on-1 with a client. Please reply to this email or text (561) 324-2189 with what you need and we will get right back to you.\n\nBest,\nClean Results Staff',
             runCount: 22,
             lastRunAt: nowIso,
           },
@@ -309,6 +382,15 @@ function createDefaultStore(env = process.env) {
             managedBy: 'Rivvak Media',
             template:
               'Thanks for training with us at Clean Results, {{firstName}}! If you have 30 seconds, sharing an honest Google review helps local West Palm Beach lifters find us.',
+            smsScript:
+              'Thanks for training with us at Clean Results, {{firstName}}! If you have 30 seconds, sharing an honest Google review helps local West Palm Beach lifters find us.',
+            emailSubject: 'Thank you for training with Clean Results! (Quick Google Review)',
+            emailHeaders: {
+              'X-Entity-Ref-ID': 'clean-results-gbp-review',
+              'List-Unsubscribe': '<mailto:connect@rivvak.com?subject=unsubscribe>',
+            },
+            emailTemplate:
+              'Hi {{firstName}},\n\nThank you for working hard with us at Clean Results House of Fitness! If you enjoyed your session, sharing a quick 30-second Google review means the world to our coaching staff and helps other local West Palm Beach lifters find our private gym.\n\nReview link: https://g.page/r/clean-results/review\n\nThank you for being part of our family!\n— Bobby',
             runCount: 31,
             lastRunAt: nowIso,
           },
@@ -887,11 +969,12 @@ function tryReadValidStoreFile(filePath) {
  * @param {object} env
  * @returns {object}
  */
-function loadStore(storePath, env = process.env) {
-  fs.mkdirSync(path.dirname(storePath), { recursive: true });
-  const bakPath = `${storePath}.bak`;
+function loadStoreFromFile(storePath, env = process.env) {
+  const actualPath = storePath ? path.resolve(storePath) : resolveStorePath();
+  fs.mkdirSync(path.dirname(actualPath), { recursive: true });
+  const bakPath = `${actualPath}.bak`;
 
-  const primary = tryReadValidStoreFile(storePath);
+  const primary = tryReadValidStoreFile(actualPath);
   if (primary) {
     return normalizeStoreShape(primary, env);
   }
@@ -900,14 +983,14 @@ function loadStore(storePath, env = process.env) {
   if (backup) {
     const recovered = normalizeStoreShape(backup, env);
     const serialized = JSON.stringify(recovered, null, 2);
-    const tmpPath = `${storePath}.${process.pid}.${Date.now()}.recover.tmp`;
+    const tmpPath = `${actualPath}.${process.pid}.${Date.now()}.recover.tmp`;
     fs.writeFileSync(tmpPath, serialized, 'utf8');
-    fs.renameSync(tmpPath, storePath);
+    fs.renameSync(tmpPath, actualPath);
     return recovered;
   }
 
   const initial = createDefaultStore(env);
-  saveStore(storePath, initial);
+  saveStoreToFile(actualPath, initial);
   return initial;
 }
 
@@ -916,15 +999,16 @@ function loadStore(storePath, env = process.env) {
  * @param {string} storePath
  * @param {object} store
  */
-function saveStore(storePath, store) {
-  fs.mkdirSync(path.dirname(storePath), { recursive: true });
+function saveStoreToFile(storePath, store) {
+  const actualPath = storePath ? path.resolve(storePath) : resolveStorePath();
+  fs.mkdirSync(path.dirname(actualPath), { recursive: true });
   store.updatedAt = new Date().toISOString();
   const serialized = JSON.stringify(store, null, 2);
-  const bakPath = `${storePath}.bak`;
+  const bakPath = `${actualPath}.bak`;
 
-  if (fs.existsSync(storePath)) {
+  if (fs.existsSync(actualPath)) {
     try {
-      const currentRaw = fs.readFileSync(storePath, 'utf8');
+      const currentRaw = fs.readFileSync(actualPath, 'utf8');
       if (currentRaw.trim()) {
         const parsed = JSON.parse(currentRaw);
         if (parsed && typeof parsed.clients === 'object') {
@@ -938,9 +1022,233 @@ function saveStore(storePath, store) {
     }
   }
 
-  const tmpPath = `${storePath}.${process.pid}.${Date.now()}.tmp`;
+  const tmpPath = `${actualPath}.${process.pid}.${Date.now()}.tmp`;
   fs.writeFileSync(tmpPath, serialized, 'utf8');
-  fs.renameSync(tmpPath, storePath);
+  fs.renameSync(tmpPath, actualPath);
+}
+
+/**
+ * Execute a SQL statement against Neon serverless HTTP SQL endpoint.
+ * Zero external npm runtime dependencies: uses native node https.request.
+ * @param {string} dbUrl
+ * @param {string} queryText
+ * @param {Array<any>} [params]
+ * @returns {Promise<object>}
+ */
+function executeNeonSql(dbUrl, queryText, params = []) {
+  return new Promise((resolve, reject) => {
+    let hostname;
+    try {
+      const u = new url.URL(dbUrl);
+      hostname = u.hostname;
+    } catch (err) {
+      return reject(new Error(`Invalid DATABASE_URL: ${err.message}`));
+    }
+
+    const payload = JSON.stringify({ query: queryText, params });
+    const req = https.request(
+      {
+        hostname,
+        port: 443,
+        path: '/sql',
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Neon-Connection-String': dbUrl,
+          'Content-Length': Buffer.byteLength(payload),
+        },
+      },
+      (res) => {
+        let body = '';
+        res.on('data', (chunk) => {
+          body += chunk;
+        });
+        res.on('end', () => {
+          if (res.statusCode >= 200 && res.statusCode < 300) {
+            try {
+              resolve(JSON.parse(body));
+            } catch (err) {
+              resolve({ raw: body });
+            }
+          } else {
+            reject(new Error(`Neon SQL error (HTTP ${res.statusCode}): ${body}`));
+          }
+        });
+      }
+    );
+
+    req.on('error', (err) => {
+      reject(new Error(`Neon SQL network error: ${err.message}`));
+    });
+
+    req.setTimeout(15000, () => {
+      req.destroy(new Error('Neon SQL request timed out after 15000ms'));
+    });
+
+    req.write(payload);
+    req.end();
+  });
+}
+
+let _dbInitPromise = null;
+
+/**
+ * Auto-initialize the 'rivvak_store' table in PostgreSQL.
+ * (id TEXT PRIMARY KEY, data JSONB NOT NULL, updated_at TIMESTAMPTZ NOT NULL)
+ * @param {string} dbUrl
+ * @returns {Promise<void>}
+ */
+async function ensurePostgresTableInitialized(dbUrl) {
+  if (_dbInitPromise) return _dbInitPromise;
+  _dbInitPromise = (async () => {
+    const ddl = `CREATE TABLE IF NOT EXISTS rivvak_store (
+      id TEXT PRIMARY KEY,
+      data JSONB NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL
+    );`;
+    await executeNeonSql(dbUrl, ddl);
+  })().catch((err) => {
+    _dbInitPromise = null;
+    throw err;
+  });
+  return _dbInitPromise;
+}
+
+/**
+ * Load store from Neon PostgreSQL 'rivvak_store' table.
+ * If row is missing, seeds from disk store.json (or default store) and persists to PostgreSQL.
+ * @param {string} dbUrl
+ * @param {string} storePath
+ * @param {object} env
+ * @returns {Promise<object>}
+ */
+async function loadStoreFromPostgres(dbUrl, storePath, env = process.env) {
+  try {
+    await ensurePostgresTableInitialized(dbUrl);
+    const selectSql = `SELECT data, updated_at FROM rivvak_store WHERE id = $1 LIMIT 1;`;
+    const result = await executeNeonSql(dbUrl, selectSql, ['main']);
+    if (result && Array.isArray(result.rows) && result.rows.length > 0) {
+      let rowData = result.rows[0].data;
+      if (typeof rowData === 'string') {
+        try {
+          rowData = JSON.parse(rowData);
+        } catch (_) {}
+      }
+      const normalized = normalizeStoreShape(rowData, env);
+      if (result.rows[0].updated_at) {
+        normalized.updatedAt = new Date(result.rows[0].updated_at).toISOString();
+      }
+      if (storePath) {
+        try {
+          saveStoreToFile(storePath, normalized);
+        } catch (_) {}
+      }
+      return normalized;
+    }
+
+    // Row not yet in PostgreSQL: migrate existing local store.json or seed defaults
+    let seedStore = null;
+    if (storePath) {
+      const local = tryReadValidStoreFile(storePath);
+      if (local) {
+        seedStore = normalizeStoreShape(local, env);
+      }
+    }
+    if (!seedStore) {
+      seedStore = createDefaultStore(env);
+    }
+    await saveStoreToPostgres(dbUrl, storePath, seedStore);
+    return seedStore;
+  } catch (err) {
+    console.error(`[rivvak-store] PostgreSQL read failed (${err.message}), falling back to disk store`);
+    return loadStoreFromFile(storePath, env);
+  }
+}
+
+/**
+ * Persist store to Neon PostgreSQL 'rivvak_store' table and synchronize local disk file.
+ * @param {string} dbUrl
+ * @param {string} storePath
+ * @param {object} store
+ * @returns {Promise<void>}
+ */
+async function saveStoreToPostgres(dbUrl, storePath, store) {
+  // Always update disk file first so local backup is immediate
+  if (storePath) {
+    try {
+      saveStoreToFile(storePath, store);
+    } catch (_) {}
+  }
+  await ensurePostgresTableInitialized(dbUrl);
+  store.updatedAt = new Date().toISOString();
+  const serialized = JSON.stringify(store);
+  const upsertSql = `INSERT INTO rivvak_store (id, data, updated_at)
+    VALUES ($1, $2, $3)
+    ON CONFLICT (id) DO UPDATE SET
+      data = EXCLUDED.data,
+      updated_at = EXCLUDED.updated_at;`;
+  await executeNeonSql(dbUrl, upsertSql, ['main', serialized, store.updatedAt]);
+}
+
+/**
+ * Retrieve database URL from env or process.env.
+ * @param {object} env
+ * @returns {string|null}
+ */
+function getDatabaseUrl(env = process.env) {
+  if (env && env !== process.env) {
+    if (typeof env.DATABASE_URL === 'string' && env.DATABASE_URL.trim()) {
+      return env.DATABASE_URL.trim();
+    }
+    return null;
+  }
+  if (process.env.DATABASE_URL && typeof process.env.DATABASE_URL === 'string' && process.env.DATABASE_URL.trim()) {
+    return process.env.DATABASE_URL.trim();
+  }
+  return null;
+}
+
+/**
+ * Check if PostgreSQL storage is configured and active.
+ * @param {object} env
+ * @returns {boolean}
+ */
+function isDatabaseConfigured(env = process.env) {
+  const urlStr = getDatabaseUrl(env);
+  return Boolean(urlStr && /^postgres(ql)?:\/\//i.test(urlStr));
+}
+
+/**
+ * Load store. Activates persistent PostgreSQL storage when DATABASE_URL is set,
+ * while preserving atomic JSON store.json fallback when DATABASE_URL is unset.
+ * @param {string} storePath
+ * @param {object} [env]
+ * @returns {object|Promise<object>}
+ */
+function loadStore(storePath, env = process.env) {
+  const actualPath = storePath ? path.resolve(storePath) : resolveStorePath();
+  const dbUrl = getDatabaseUrl(env);
+  if (dbUrl) {
+    return loadStoreFromPostgres(dbUrl, actualPath, env);
+  }
+  return loadStoreFromFile(actualPath, env);
+}
+
+/**
+ * Save store. Activates persistent PostgreSQL storage when DATABASE_URL is set,
+ * while preserving atomic JSON store.json fallback when DATABASE_URL is unset.
+ * @param {string} storePath
+ * @param {object} store
+ * @param {object} [env]
+ * @returns {void|Promise<void>}
+ */
+function saveStore(storePath, store, env = process.env) {
+  const actualPath = storePath ? path.resolve(storePath) : resolveStorePath();
+  const dbUrl = getDatabaseUrl(env);
+  if (dbUrl) {
+    return saveStoreToPostgres(dbUrl, actualPath, store);
+  }
+  return saveStoreToFile(actualPath, store);
 }
 
 /**
@@ -2956,7 +3264,7 @@ async function runSchedulerTick(clientSlugOrOpts = null, maybeOpts = {}) {
   const env = options.env || process.env;
   const fetchImpl = options.fetchImpl || globalThis.fetch;
   const storePath = resolveStorePath(options);
-  const store = options.store || loadStore(storePath, env);
+  const store = options.store || (await loadStore(storePath, env));
   const now = options.now ? new Date(options.now) : new Date();
   const nowMs = now.getTime();
   const nowIso = now.toISOString();
@@ -3193,7 +3501,7 @@ async function runSchedulerTick(clientSlugOrOpts = null, maybeOpts = {}) {
   }
 
   if (dirty && !options.store) {
-    saveStore(storePath, store);
+    await saveStore(storePath, store, env);
   }
 
   return {
@@ -3286,7 +3594,12 @@ function createServer(options = {}) {
   };
 
   // Ensure store file exists at server creation
-  loadStore(storePath, env);
+  const initialLoad = loadStore(storePath, env);
+  if (initialLoad && typeof initialLoad.catch === 'function') {
+    initialLoad.catch((err) => {
+      console.error(`[rivvak-automation-backend] Initial store load warning: ${err.message}`);
+    });
+  }
 
   const server = http.createServer(async (req, res) => {
     try {
@@ -3306,7 +3619,7 @@ function createServer(options = {}) {
       const pathname = (parsedUrl.pathname || '/').replace(/\/+$/, '') || '/';
       const queryParams = Object.fromEntries(parsedUrl.searchParams.entries());
       const method = (req.method || 'GET').toUpperCase();
-      const store = loadStore(storePath, env);
+      const store = await loadStore(storePath, env);
 
       // --- Public Routes ---
       if (method === 'GET' && pathname === '/') {
@@ -3571,7 +3884,7 @@ function createServer(options = {}) {
           }
         }
 
-        saveStore(storePath, store);
+        await saveStore(storePath, store, env);
         sendJson(res, 201, {
           ok: true,
           leadId,
@@ -3702,7 +4015,7 @@ function createServer(options = {}) {
           });
         }
 
-        saveStore(storePath, store);
+        await saveStore(storePath, store, env);
         sendJson(res, 200, {
           ok: true,
           received: true,
@@ -3754,7 +4067,7 @@ function createServer(options = {}) {
           deliveryMode: 'inbound_twilio',
           sid,
         });
-        saveStore(storePath, store);
+        await saveStore(storePath, store, env);
         sendJson(res, 200, {
           ok: true,
           clientSlug: client.slug,
@@ -3832,7 +4145,7 @@ function createServer(options = {}) {
           });
           updatedThreads.push({ clientSlug: client.slug, threadId: thread.id, unread: thread.unread });
         }
-        saveStore(storePath, store);
+        await saveStore(storePath, store, env);
         sendJson(res, 200, { ok: true, processed: updatedThreads.length, updatedThreads });
         return;
       }
@@ -3861,7 +4174,7 @@ function createServer(options = {}) {
           deliveryMode: 'inbound_gbp',
           sid: data.reviewId || '',
         });
-        saveStore(storePath, store);
+        await saveStore(storePath, store, env);
         sendJson(res, 200, {
           ok: true,
           clientSlug: client.slug,
@@ -3918,7 +4231,7 @@ function createServer(options = {}) {
               store.clients[slug] = { ...prev, ...incoming, slug };
             }
           }
-          saveStore(storePath, store);
+          await saveStore(storePath, store, env);
           sendJson(res, 200, { ok: true, updatedAt: store.updatedAt, clientCount: Object.keys(store.clients).length });
           return;
         }
@@ -3970,7 +4283,7 @@ function createServer(options = {}) {
             processedScheduleKeys: {},
           };
           store.clients[slug] = created;
-          saveStore(storePath, store);
+          await saveStore(storePath, store, env);
           sendJson(res, 201, { ok: true, slug, client: created });
           return;
         }
@@ -3985,7 +4298,7 @@ function createServer(options = {}) {
             fetchImpl,
             smtpSendImpl,
           });
-          if (tickRes.processedCount > 0) saveStore(storePath, store);
+          if (tickRes.processedCount > 0) await saveStore(storePath, store, env);
           sendJson(res, 200, tickRes);
           return;
         }
@@ -4023,7 +4336,7 @@ function createServer(options = {}) {
             lead.notes = String(data.notes ?? '').trim().slice(0, 3000);
           }
           lead.updatedAt = new Date().toISOString();
-          saveStore(storePath, store);
+          await saveStore(storePath, store, env);
           sendJson(res, 200, { ok: true, lead });
           return;
         }
@@ -4100,7 +4413,7 @@ function createServer(options = {}) {
           }
 
           const restoredStore = normalizeStoreShape(JSON.parse(JSON.stringify(candidate)), env);
-          saveStore(storePath, restoredStore);
+          await saveStore(storePath, restoredStore, env);
           sendJson(res, 200, {
             ok: true,
             restoredClients: Object.keys(restoredStore.clients).length,
@@ -4119,7 +4432,7 @@ function createServer(options = {}) {
               return;
             }
             delete store.clients[slug];
-            saveStore(storePath, store);
+            await saveStore(storePath, store, env);
             sendJson(res, 200, { ok: true, deleted: slug });
             return;
           }
@@ -4130,7 +4443,7 @@ function createServer(options = {}) {
             }
             const { data } = await readRequestBody(req);
             store.clients[slug] = { ...store.clients[slug], ...data, slug };
-            saveStore(storePath, store);
+            await saveStore(storePath, store, env);
             sendJson(res, 200, { ok: true, slug, client: store.clients[slug] });
             return;
           }
@@ -4172,7 +4485,7 @@ function createServer(options = {}) {
             slug,
             accessCode: auth.role === 'admin' && incoming.accessCode ? incoming.accessCode : preservedCode,
           };
-          saveStore(storePath, store);
+          await saveStore(storePath, store, env);
           sendJson(res, 200, { ok: true, slug, client: store.clients[slug], updatedAt: store.updatedAt });
           return;
         }
@@ -4195,7 +4508,7 @@ function createServer(options = {}) {
           }
 
           const summary = importPushPressRecords(client, kind, rawRows);
-          saveStore(storePath, store);
+          await saveStore(storePath, store, env);
           sendJson(res, 200, { ok: true, slug, ...summary });
           return;
         }
@@ -4207,7 +4520,7 @@ function createServer(options = {}) {
             return;
           }
           const out = await dispatchChannelMessage(client, store, 'SMS', data, { env, fetchImpl });
-          saveStore(storePath, store);
+          await saveStore(storePath, store, env);
           sendJson(res, out.statusCode, out.result);
           return;
         }
@@ -4219,7 +4532,7 @@ function createServer(options = {}) {
             return;
           }
           const out = await dispatchChannelMessage(client, store, 'Email', data, { env, fetchImpl, smtpSendImpl });
-          saveStore(storePath, store);
+          await saveStore(storePath, store, env);
           sendJson(res, out.statusCode, out.result);
           return;
         }
@@ -4238,7 +4551,7 @@ function createServer(options = {}) {
             { ...data, recipientId },
             { env, fetchImpl }
           );
-          saveStore(storePath, store);
+          await saveStore(storePath, store, env);
           sendJson(res, out.statusCode, out.result);
           return;
         }
@@ -4262,7 +4575,7 @@ function createServer(options = {}) {
             { workflow, contact, payload: data.payload || data, webhookUrl: data.webhookUrl },
             { env, fetchImpl, smtpSendImpl }
           );
-          saveStore(storePath, store);
+          await saveStore(storePath, store, env);
           sendJson(res, 200, {
             ok: true,
             slug,
@@ -4284,7 +4597,7 @@ function createServer(options = {}) {
             fetchImpl,
             smtpSendImpl,
           });
-          if (tickRes.processedCount > 0) saveStore(storePath, store);
+          if (tickRes.processedCount > 0) await saveStore(storePath, store, env);
           sendJson(res, 200, tickRes);
           return;
         }
@@ -4336,7 +4649,7 @@ function createServer(options = {}) {
  * @param {object} options
  * @returns {Promise<{ server: http.Server, port: number, url: string, dataDir: string, storePath: string, close: Function, stop: Function, runSchedulerTick: Function }>}
  */
-function startServer(options = {}) {
+async function startServer(options = {}) {
   if (options.loadEnv !== false) {
     loadDotEnv(options.envPath);
   }
@@ -4345,6 +4658,15 @@ function startServer(options = {}) {
   const host = options.host || env.HOST || '127.0.0.1';
   const server = createServer(options);
   const { storePath, fetchImpl } = server._rivvakContext;
+
+  const dbUrl = getDatabaseUrl(env);
+  if (dbUrl) {
+    try {
+      await ensurePostgresTableInitialized(dbUrl);
+    } catch (err) {
+      console.error(`[rivvak-automation-backend] PostgreSQL initialization warning: ${err.message}`);
+    }
+  }
 
   const enableInterval = options.enableScheduler !== false;
   const intervalMs = Number(options.schedulerIntervalMs || env.SCHEDULER_INTERVAL_MS || 60000);
@@ -4434,4 +4756,8 @@ module.exports = {
   safeEqualToken,
   loadDotEnv,
   parseDotEnvFile,
+  executeNeonSql,
+  ensurePostgresTableInitialized,
+  isDatabaseConfigured,
+  getDatabaseUrl,
 };
