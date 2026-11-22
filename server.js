@@ -141,8 +141,8 @@ function createDefaultStore(env = process.env) {
         email: 'connect@rivvak.com',
         location: 'West Palm Beach, FL',
         accessCode: 'CLEAN-2026',
-        assignedDemos: ['/pages/demo-gym'],
-        customUrl: '',
+        assignedDemos: ['/demo/gym'],
+        customUrl: 'https://rivvak.com/demo/gym',
         webhookUrl: '',
         twilioNumber: env.TWILIO_FROM_NUMBER || '',
         igUserId: env.META_IG_USER_ID || '',
@@ -867,6 +867,180 @@ function createDefaultStore(env = process.env) {
         outboundQueue: [],
         processedScheduleKeys: {},
       },
+      'blue-diamond-pools': {
+        slug: 'blue-diamond-pools',
+        id: 'c_blue_diamond',
+        business: 'Blue Diamond Pools',
+        owner: 'Jaime',
+        phone: '(954) 755-0777',
+        email: 'info@bluediamondpools.com',
+        location: 'Broward & Palm Beach County, FL',
+        accessCode: 'BLUEDIAMOND-2026',
+        assignedDemos: ['/demo/pool'],
+        customUrl: 'https://rivvak.com/demo/pool',
+        webhookUrl: '',
+        twilioNumber: env.TWILIO_FROM_NUMBER || '',
+        igUserId: env.META_IG_USER_ID || '',
+        modules: {
+          analytics: { enabled: true, mode: 'self', label: 'Website & Analytics' },
+          ads: { enabled: true, mode: 'managed', label: 'Meta Ad Manager' },
+          calendars: { enabled: true, mode: 'self', label: 'Calendars & Bookings' },
+          workflows: { enabled: true, mode: 'managed', label: 'Workflows & Email/SMS' },
+          contacts: { enabled: true, mode: 'self', label: 'Contacts (CRM)' },
+          inbox: { enabled: true, mode: 'self', label: 'Conversations (Inbox)' },
+          opportunities: { enabled: true, mode: 'self', label: 'Opportunities (Funnel)' },
+          marketing: { enabled: true, mode: 'self', label: 'Marketing Extras' },
+        },
+        campaigns: [
+          {
+            id: 'cmp_bdp_resurface',
+            name: 'Diamond Brite & Pool Remodel (Broward / Palm Beach)',
+            platform: 'Google Search & Local Map Pack',
+            status: 'Active',
+            managedBy: 'Rivvak Media',
+            targetLocations: ['Boca Raton, FL', 'Parkland, FL', 'Coral Springs, FL', 'West Palm Beach, FL', 'Fort Lauderdale, FL'],
+            objective: 'High-Ticket Resurfacing, Remodels & Weekly Route Quotes',
+            dailyBudget: 40,
+            spend: 0,
+            leads: 1,
+            cpl: 0,
+          },
+        ],
+        leadSources: [
+          { name: 'Interactive Pool Calculator (/demo/pool)', count: 14, conversionPct: 42 },
+          { name: 'Google Search & Maps GBP', count: 19, conversionPct: 36 },
+          { name: 'Broward & Palm Beach Referrals', count: 11, conversionPct: 64 },
+        ],
+        bookings: [
+          {
+            id: 'bk_bdp_1',
+            leadName: 'Patricia Alvarez (Parkland)',
+            phone: '+19545550188',
+            email: 'palvarez@example.com',
+            sessionType: 'Diamond Brite Quartz & Glass Tile Estimate',
+            staff: 'Jaime',
+            scheduledAt: plusHours(22),
+            status: 'Tour Scheduled',
+            notes: 'Standard 15k gal pool + raised spa; chalky marcite plaster replacement.',
+          },
+        ],
+        workflows: [
+          {
+            id: 'wf_bdp_speed_to_lead',
+            name: 'Pool Estimate Speed-to-Lead SMS (<60s)',
+            trigger: 'new_lead',
+            delayMinutes: 1,
+            channel: 'SMS',
+            active: true,
+            managedBy: 'Rivvak Media',
+            template:
+              'Hi {{firstName}}, Jaime from Blue Diamond Pools (FL #CPC1459702) here! Got your pool quote request — what morning or afternoon works for a quick backyard measurement?',
+            runCount: 0,
+            lastRunAt: null,
+          },
+          {
+            id: 'wf_bdp_review',
+            name: 'FTC-Compliant Post-Service Google Review Ask',
+            trigger: 'booking_completed',
+            delayMinutes: 120,
+            channel: 'SMS',
+            active: true,
+            managedBy: 'Rivvak Media',
+            template:
+              'Thanks for trusting Blue Diamond Pools with your pool! If you would like to share honest feedback on Google, tap here anytime.',
+            runCount: 0,
+            lastRunAt: null,
+          },
+        ],
+        contacts: [
+          {
+            id: 'ct_bdp_1',
+            firstName: 'Jaime',
+            lastName: '(Owner — State #CPC1459702)',
+            name: 'Jaime (Owner)',
+            email: 'info@bluediamondpools.com',
+            phone: '(954) 755-0777',
+            tags: ['Owner', 'CPC1459702', 'CPO'],
+            status: 'Active Member',
+            source: 'Google Doc — Jaime Pool Company',
+            birthday: '',
+            injuryNotes: 'Broward & Palm Beach County since 1997',
+            membershipTier: 'Tier 2 Staging',
+            joinedAt: minusDays(1),
+            lastCheckInAt: minusDays(1),
+            customFields: {
+              license: 'State #CPC1459702',
+              leadSource: '72-Hour Staging Preview',
+            },
+            createdAt: nowIso,
+            updatedAt: nowIso,
+          },
+        ],
+        inboxThreads: [
+          {
+            id: 'th_bdp_1',
+            channel: 'Email',
+            contactName: 'Rivvak Media Studio',
+            contactEmail: 'connect@rivvak.com',
+            unread: 1,
+            lastMessageAt: nowIso,
+            preview: '72-hour interactive staging preview live at rivvak.com/demo/pool',
+            messages: [
+              {
+                id: 'msg_bdp_1',
+                direction: 'inbound',
+                channel: 'Email',
+                sender: 'connect@rivvak.com',
+                subject: 'Blue Diamond Pools 72-Hour Staging Preview',
+                body: 'Jaime, your interactive pool cleaner canvas, algae-to-crystal slider, and 20-second quote calculator are staged at https://rivvak.com/demo/pool.',
+                receivedAt: nowIso,
+                deliveryMode: 'seeded',
+              },
+            ],
+          },
+        ],
+        opportunities: [
+          {
+            id: 'opp_bdp_1',
+            title: 'Patricia Alvarez — Diamond Brite Resurface',
+            contactName: 'Patricia Alvarez',
+            email: 'palvarez@example.com',
+            phone: '+19545550188',
+            stage: 'Tour / Trial',
+            value: 6850,
+            source: 'Interactive Pool Calculator (/demo/pool)',
+            status: 'Open',
+            createdAt: nowIso,
+            updatedAt: nowIso,
+          },
+        ],
+        marketing: {
+          mediaAssets: [
+            { id: 'ma_bdp_1', title: 'Blue Diamond Pools Live Showcase', type: 'Interactive Demo', url: '/demo/pool', tags: ['Pool', 'South Florida'] },
+          ],
+          scheduledPosts: [
+            {
+              id: 'sp_bdp_1',
+              platform: 'IG Reel',
+              title: 'Green-to-Crystal Acid Wash & Diamond Brite Reveal',
+              caption: 'Licensed South Florida pool builders since 1997 (#CPC1459702). Get an instant estimate in 20 seconds.',
+              scheduledAt: plusHours(48),
+              status: 'Scheduled',
+            },
+          ],
+          brandBoard: {
+            colors: ['#0A0F14', '#5AD1FF', '#FFD23F', '#F4F7F9'],
+            fonts: 'Archivo / Inter Tight / JetBrains Mono',
+            serviceAreas: 'Boca Raton, Parkland, Coral Springs, Fort Lauderdale, West Palm Beach, Wellington, Delray Beach',
+          },
+          templates: [
+            { id: 'tpl_bdp_1', title: 'Pool Quote Follow-Up SMS', channel: 'SMS', body: 'Hi {{firstName}}, Jaime from Blue Diamond Pools (#CPC1459702) here! Happy to stop by for an exact measurement this week.' },
+          ],
+        },
+        executionLogs: [],
+        outboundQueue: [],
+        processedScheduleKeys: {},
+      },
     },
     publicLeads: [
       {
@@ -922,6 +1096,12 @@ function normalizeStoreShape(parsed, env = process.env) {
   }
   if (!parsed.clients || typeof parsed.clients !== 'object' || Array.isArray(parsed.clients)) {
     parsed.clients = defaults.clients;
+  } else {
+    for (const [slug, defClient] of Object.entries(defaults.clients)) {
+      if (!parsed.clients[slug]) {
+        parsed.clients[slug] = defClient;
+      }
+    }
   }
   if (!parsed.settings || typeof parsed.settings !== 'object') {
     parsed.settings = defaults.settings;
@@ -1494,7 +1674,7 @@ function renderStatusDashboardHtml({ uptimeSeconds, clientsCount, publicLeadsCou
 function isAllowedOrigin(origin, env = process.env) {
   if (!origin || typeof origin !== 'string') return false;
   const cleaned = origin.trim().replace(/\/+$/, '');
-  if (cleaned === 'https://rivvak.com' || cleaned === 'https://www.rivvak.com') {
+  if (cleaned === 'https://rivvak.com' || cleaned === 'https://www.rivvak.com' || cleaned === 'https://fdguvq-yv.myshopify.com') {
     return true;
   }
   if (/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(cleaned)) {

@@ -268,8 +268,15 @@ async function runTests() {
         });
         assert.strictEqual(h.status, 200);
         assert.strictEqual(h.data.ok, true);
-        assert.strictEqual(h.data.clients, 2);
+        assert.strictEqual(h.data.clients, 3);
         assert.strictEqual(h.headers.get('access-control-allow-origin'), 'https://rivvak.com');
+
+        const shopifyOriginPreflight = await fetch(`${baseUrl}/api/health`, {
+          method: 'OPTIONS',
+          headers: { Origin: 'https://fdguvq-yv.myshopify.com' },
+        });
+        assert.strictEqual(shopifyOriginPreflight.status, 204);
+        assert.strictEqual(shopifyOriginPreflight.headers.get('access-control-allow-origin'), 'https://fdguvq-yv.myshopify.com');
 
         const localPreflight = await fetch(`${baseUrl}/api/health`, {
           method: 'OPTIONS',
@@ -298,6 +305,7 @@ async function runTests() {
         assert.strictEqual(stateRes.status, 200);
         assert.ok(stateRes.data.clients['clean-results'], 'Clean Results client seeded');
         assert.ok(stateRes.data.clients['carleen-ligozio'], 'Carleen Ligozio client seeded');
+        assert.ok(stateRes.data.clients['blue-diamond-pools'], 'Blue Diamond Pools client seeded');
         const cr = stateRes.data.clients['clean-results'];
         assert.strictEqual(cr.workflows.length, 7, 'Clean Results seeded with 7 gym workflows');
         assert.ok(
@@ -763,7 +771,7 @@ async function runTests() {
         assert.strictEqual(rootJson.data.version, '2.0.0');
         assert.strictEqual(rootJson.data.status, 'online');
         assert.strictEqual(typeof rootJson.data.uptimeSeconds, 'number');
-        assert.strictEqual(rootJson.data.clients, 2);
+        assert.strictEqual(rootJson.data.clients, 3);
         assert.strictEqual(rootJson.data.publicLeadsCount, 1);
         assert.strictEqual(rootJson.data.smtpConfigured, false);
         assert.ok(rootJson.data.endpoints && rootJson.data.endpoints.health === '/api/health');
@@ -966,7 +974,7 @@ async function runTests() {
           });
           assert.strictEqual(restoreRes.status, 200);
           assert.strictEqual(restoreRes.data.ok, true);
-          assert.strictEqual(restoreRes.data.restoredClients, 2);
+          assert.strictEqual(restoreRes.data.restoredClients, 3);
           assert.ok(fs.existsSync(`${bakServer.storePath}.bak`), 'Restore must preserve pre-restore .bak snapshot');
 
           const afterSync = await jsonReq(bakServer.url, '/api/state', { token: 'RIVVAK-2026' });
