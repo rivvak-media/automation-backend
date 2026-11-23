@@ -1283,17 +1283,19 @@ async function runTests() {
         const clientDenied = await jsonReq(baseUrl, '/api/admin/integrations', { token: 'CLEAN-2026' });
         assert.strictEqual(clientDenied.status, 403);
 
-        // Partial env: ALLOWED_ORIGINS + META_VERIFY_TOKEN + built-in Rivvak First-Party Analytics
+        // Partial env: ALLOWED_ORIGINS + META_VERIFY_TOKEN + built-in First-Party Analytics & Shopify Checkout
         const partialRes = await jsonReq(baseUrl, '/api/admin/integrations', { token: 'Jh22mp21??.' });
         assert.strictEqual(partialRes.status, 200);
         assert.strictEqual(partialRes.data.ok, true);
-        assert.deepStrictEqual(partialRes.data.summary, { connected: 2, missing: 12, total: 14 });
+        assert.deepStrictEqual(partialRes.data.summary, { connected: 3, missing: 11, total: 14 });
         assert.strictEqual(partialRes.data.integrations.length, 14);
         assert.strictEqual(partialRes.raw.includes('rivvak-meta-verify-2026'), false, 'Never leak raw env values');
         assert.strictEqual(partialRes.raw.includes('Jh22mp21??.'), false, 'Never leak passcode');
 
         const firstPartyItem = partialRes.data.integrations.find((i) => i.id === 'rivvak-first-party-analytics');
         assert.ok(firstPartyItem && firstPartyItem.connected === true);
+        const billingItem = partialRes.data.integrations.find((i) => i.id === 'shopify-checkout-billing');
+        assert.ok(billingItem && billingItem.connected === true);
         const corsItem = partialRes.data.integrations.find((i) => i.name === 'Shopify Storefront CORS');
         assert.ok(corsItem && corsItem.connected === true);
         const metaItem = partialRes.data.integrations.find((i) => i.name === 'Meta / Facebook & Instagram');
@@ -1536,6 +1538,93 @@ async function runTests() {
           if (extServer) await extServer.stop().catch(() => {});
           fs.rmSync(extTmpDir, { recursive: true, force: true });
         }
+      }),
+
+      check('25. Client-owned Stripe config, secret masking, cross-tenant 403 & per-client webhook HMAC verification', async () => {
+        const badPrefix = await jsonReq(baseUrl, '/api/client/clean-results/stripe-config', {
+          method: 'POST',
+          token: 'CLEAN-2026',
+          body: { publishableKey: 'bad_pk', secretKey: 'sk_live_testsecret_9876' },
+        });
+        assert.strictEqual(badPrefix.status, 400);
+
+        const crossDenied = await jsonReq(baseUrl, '/api/client/clean-results/stripe-config', {
+          method: 'POST',
+          token: 'CARLEEN-2026',
+          body: { publishableKey: 'pk_live_hack1234' },
+        });
+        assert.strictEqual(crossDenied.status, 403);
+
+        const clientSecret = 'sk_live_bobby_supersecret_4321';
+        const clientWhSecret = 'whsec_bobby_webhook_9988';
+        const saveRes = await jsonReq(baseUrl, '/api/client/clean-results/stripe-config', {
+          method: 'POST',
+          token: 'CLEAN-2026',
+          body: {
+            publishableKey: 'pk_live_bobby_public_1122',
+            secretKey: clientSecret,
+            webhookSecret: clientWhSecret,
+            paymentLink: 'https://buy.stripe.com/test_bobby_149',
+          },
+        });
+        assert.strictEqual(saveRes.status, 200);
+        assert.strictEqual(saveRes.data.ok, true);
+        assert.strictEqual(saveRes.data.stripeConfig.connected, true);
+        assert.strictEqual(saveRes.data.stripeConfig.hasSecretKey, true);
+        assert.strictEqual(saveRes.data.stripeConfig.secretKeyMask, '••••4321');
+        assert.strictEqual(saveRes.data.stripeConfig.hasWebhookSecret, true);
+        assert.strictEqual(saveRes.data.stripeConfig.webhookSecretMask, '••••9988');
+        assert.strictEqual(saveRes.raw.includes(clientSecret), false, 'Never return raw Stripe secretKey');
+        assert.strictEqual(saveRes.raw.includes(clientWhSecret), false, 'Never return raw Stripe webhookSecret');
+
+        const getClient = await jsonReq(baseUrl, '/api/client/clean-results', { token: 'CLEAN-2026' });
+        assert.strictEqual(getClient.status, 200);
+        assert.strictEqual(getClient.raw.includes(clientSecret), false);
+        assert.strictEqual(getClient.raw.includes(clientWhSecret), false);
+        assert.strictEqual(getClient.data.client.stripeConfig.hasSecretKey, true);
+
+        // Verify PUT /api/client/clean-results preserves saved secrets cleanly
+        const putSync = await jsonReq(baseUrl, '/api/client/clean-results', {
+          method: 'PUT',
+          token: 'CLEAN-2026',
+          body: { client: { ...getClient.data.client, notes: 'Updated portal notes' } },
+        });
+        assert.strictEqual(putSync.status, 200);
+        assert.strictEqual(putSync.data.client.stripeConfig.hasSecretKey, true);
+        assert.strictEqual(putSync.data.client.stripeConfig.hasWebhookSecret, true);
+
+        const adminClients = await jsonReq(baseUrl, '/api/admin/clients', { token: 'Jh22mp21??.' });
+        assert.strictEqual(adminClients.status, 200);
+        assert.strictEqual(adminClients.raw.includes(clientSecret), false);
+        assert.strictEqual(adminClients.raw.includes(clientWhSecret), false);
+
+        // Per-client Stripe webhook HMAC-SHA256 verification
+        const evtPayload = JSON.stringify({
+          id: 'evt_bobby_test_1',
+          type: 'invoice.paid',
+          data: { object: { amount_paid: 19900, currency: 'usd', payment_status: 'paid' } },
+        });
+        const ts = Math.floor(Date.now() / 1000);
+        const validSig = crypto
+          .createHmac('sha256', clientWhSecret)
+          .update(`${ts}.${evtPayload}`)
+          .digest('hex');
+
+        const badHook = await fetch(`${baseUrl}/webhooks/stripe?client=clean-results`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'stripe-signature': `t=${ts},v1=deadbeef` },
+          body: evtPayload,
+        });
+        assert.strictEqual(badHook.status, 400);
+
+        const goodHook = await fetch(`${baseUrl}/webhooks/stripe?client=clean-results`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'stripe-signature': `t=${ts},v1=${validSig}` },
+          body: evtPayload,
+        });
+        assert.strictEqual(goodHook.status, 200);
+        const goodJson = await goodHook.json();
+        assert.strictEqual(goodJson.clientSlug, 'clean-results');
       }),
     ];
 

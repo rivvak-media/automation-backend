@@ -1612,12 +1612,13 @@ const INTEGRATION_CATALOG = [
     unlocks: 'Organic search impressions, Map-Pack visibility & Google Business reviews',
   },
   {
-    id: 'stripe-billing-webhooks',
-    name: 'Stripe Billing & Webhooks',
+    id: 'shopify-checkout-billing',
+    name: 'Shopify Checkout (Agency Billing)',
     category: 'Billing, SMS & Automation',
-    keys: ['STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET'],
-    setupUrl: 'https://dashboard.stripe.com/apikeys',
-    unlocks: 'Verified retainer billing, checkout status & automated invoice ledger',
+    keys: ['ALLOWED_ORIGINS'],
+    alwaysActive: true,
+    setupUrl: 'https://admin.shopify.com/store/fdguvq-yv/settings/payments',
+    unlocks: 'Rivvak agency retainer checkout via Shopify (clients enter their own Stripe keys inside /pages/client-portal)',
   },
   {
     id: 'twilio-sms',
@@ -1708,6 +1709,8 @@ function buildIntegrationsStatus(env = process.env) {
       out.note = hasEnv('DATABASE_URL')
         ? 'Live first-party storefront beacon persisted in Neon PostgreSQL'
         : 'Live first-party storefront beacon active via JSON store fallback';
+    } else if (item.id === 'shopify-checkout-billing') {
+      out.note = 'Active via Shopify Checkout (Stripe is self-served per client inside /pages/client-portal)';
     } else if (usedFallback) {
       out.note =
         fallbackSources.has('GOOGLE_SERVICE_ACCOUNT_JSON') || fallbackSources.has('GA4_SERVICE_ACCOUNT_JSON')
@@ -1727,6 +1730,71 @@ function buildIntegrationsStatus(env = process.env) {
     },
     integrations,
     timestamp: new Date().toISOString(),
+  };
+}
+
+function maskSecretTail(val) {
+  const s = String(val || '').trim();
+  if (!s) return '';
+  return `••••${s.slice(-4)}`;
+}
+
+function sanitizeStripeConfig(cfg) {
+  if (!cfg || typeof cfg !== 'object') {
+    return {
+      publishableKey: '',
+      paymentLink: '',
+      hasSecretKey: false,
+      secretKeyMask: '',
+      hasWebhookSecret: false,
+      webhookSecretMask: '',
+      connected: false,
+      updatedAt: null,
+    };
+  }
+  const publishableKey = String(cfg.publishableKey || '').trim();
+  const paymentLink = String(cfg.paymentLink || '').trim();
+  const hasSecretKey = Boolean(String(cfg.secretKey || '').trim());
+  const hasWebhookSecret = Boolean(String(cfg.webhookSecret || '').trim());
+  return {
+    publishableKey,
+    paymentLink,
+    hasSecretKey,
+    secretKeyMask: maskSecretTail(cfg.secretKey),
+    hasWebhookSecret,
+    webhookSecretMask: maskSecretTail(cfg.webhookSecret),
+    connected: Boolean(publishableKey || hasSecretKey || paymentLink),
+    updatedAt: cfg.updatedAt || null,
+  };
+}
+
+function sanitizeClientForResponse(client) {
+  if (!client || typeof client !== 'object') return client;
+  if (!client.stripeConfig) return client;
+  return {
+    ...client,
+    stripeConfig: sanitizeStripeConfig(client.stripeConfig),
+  };
+}
+
+function sanitizeClientsMap(clientsMap = {}) {
+  const out = {};
+  for (const [slug, client] of Object.entries(clientsMap || {})) {
+    out[slug] = sanitizeClientForResponse(client);
+  }
+  return out;
+}
+
+function mergePreservedStripeConfig(prevCfg, incomingCfg) {
+  if (!incomingCfg && !prevCfg) return undefined;
+  const prev = prevCfg && typeof prevCfg === 'object' ? prevCfg : {};
+  const inc = incomingCfg && typeof incomingCfg === 'object' ? incomingCfg : {};
+  return {
+    publishableKey: inc.publishableKey !== undefined ? String(inc.publishableKey || '').trim() : String(prev.publishableKey || '').trim(),
+    paymentLink: inc.paymentLink !== undefined ? String(inc.paymentLink || '').trim() : String(prev.paymentLink || '').trim(),
+    secretKey: prev.secretKey || '',
+    webhookSecret: prev.webhookSecret || '',
+    updatedAt: inc.updatedAt || prev.updatedAt || null,
   };
 }
 
@@ -2449,11 +2517,25 @@ async function buildAnalyticsOverview({ store, env, range = '30d', client = 'all
     return value;
   };
 
+  const clientStripeSecret =
+    client && client !== 'all' ? String(store?.clients?.[client]?.stripeConfig?.secretKey || '').trim() : '';
+  const resolveStripeOverview = () => {
+    if (clientStripeSecret) {
+      return fetchLiveStripeOverview({ ...env, STRIPE_SECRET_KEY: clientStripeSecret }, fetchImpl);
+    }
+    if (String(env.STRIPE_SECRET_KEY || '').trim()) {
+      return fetchLiveStripeOverview(env, fetchImpl);
+    }
+    return Promise.resolve({ connected: false, mode: 'client_owned', reason: 'client_portal_managed' });
+  };
+
   const [ga4, gsc, meta, stripe] = await Promise.all([
     cachedRun(`ga4:${range}`, () => fetchLiveGa4Overview(env, range, fetchImpl, cache)),
     cachedRun(`gsc:${range}`, () => fetchLiveGscOverview(env, range, fetchImpl, cache)),
     cachedRun(`meta:${range}`, () => fetchLiveMetaOverview(env, range, fetchImpl)),
-    cachedRun(`stripe:active`, () => fetchLiveStripeOverview(env, fetchImpl)),
+    clientStripeSecret
+      ? cachedRun(`stripe:client:${client}`, resolveStripeOverview)
+      : cachedRun(`stripe:active`, resolveStripeOverview),
   ]);
 
   const leadsList = Array.isArray(store?.publicLeads) ? store.publicLeads : [];
@@ -5155,10 +5237,13 @@ function createServer(options = {}) {
         return;
       }
 
-      // Stripe Webhook Receiver (POST /webhooks/stripe)
+      // Stripe Webhook Receiver (POST /webhooks/stripe or /webhooks/stripe?client=<slug>)
       if (method === 'POST' && pathname === '/webhooks/stripe') {
         const { raw, data } = await readRequestBody(req);
-        const stripeSecret = env.STRIPE_WEBHOOK_SECRET || '';
+        const queryClientSlug = String(queryParams.client || '').trim();
+        const queryMatchedClient = queryClientSlug && store.clients[queryClientSlug] ? store.clients[queryClientSlug] : null;
+        const stripeSecret =
+          String(queryMatchedClient?.stripeConfig?.webhookSecret || '').trim() || env.STRIPE_WEBHOOK_SECRET || '';
         if (stripeSecret) {
           const toleranceSec =
             env.STRIPE_WEBHOOK_TOLERANCE_SEC !== undefined ? Number(env.STRIPE_WEBHOOK_TOLERANCE_SEC) : 300;
@@ -5182,13 +5267,13 @@ function createServer(options = {}) {
         const customerEmail = String(obj.customer_email || obj.customer_details?.email || '').trim().toLowerCase();
         const customerId = String(obj.customer || '').trim();
 
-        let matchedClient = null;
-        if (candidateSlug && store.clients[candidateSlug]) {
+        let matchedClient = queryMatchedClient;
+        if (!matchedClient && candidateSlug && store.clients[candidateSlug]) {
           matchedClient = store.clients[candidateSlug];
-        } else if (customerEmail) {
+        } else if (!matchedClient && customerEmail) {
           matchedClient =
             Object.values(store.clients || {}).find((c) => normEmail(c.email) === customerEmail) || null;
-        } else if (customerId) {
+        } else if (!matchedClient && customerId) {
           matchedClient =
             Object.values(store.clients || {}).find((c) => c.stripeCustomerId && c.stripeCustomerId === customerId) ||
             null;
@@ -5471,7 +5556,7 @@ function createServer(options = {}) {
             role: 'admin',
             settings: store.settings,
             adminState: store.adminState,
-            clients: store.clients,
+            clients: sanitizeClientsMap(store.clients),
             updatedAt: store.updatedAt,
           });
           return;
@@ -5488,7 +5573,13 @@ function createServer(options = {}) {
           if (data.clients && typeof data.clients === 'object') {
             for (const [slug, incoming] of Object.entries(data.clients)) {
               const prev = store.clients[slug] || {};
-              store.clients[slug] = { ...prev, ...incoming, slug };
+              const preservedStripe = mergePreservedStripeConfig(prev.stripeConfig, incoming.stripeConfig);
+              store.clients[slug] = {
+                ...prev,
+                ...incoming,
+                slug,
+                ...(preservedStripe ? { stripeConfig: preservedStripe } : {}),
+              };
             }
           }
           await saveStore(storePath, store, env);
@@ -5497,7 +5588,7 @@ function createServer(options = {}) {
         }
 
         if (method === 'GET' && pathname === '/api/admin/clients') {
-          sendJson(res, 200, { ok: true, clients: store.clients });
+          sendJson(res, 200, { ok: true, clients: sanitizeClientsMap(store.clients) });
           return;
         }
 
@@ -5725,9 +5816,15 @@ function createServer(options = {}) {
               return;
             }
             const { data } = await readRequestBody(req);
-            store.clients[slug] = { ...store.clients[slug], ...data, slug };
+            const preservedStripe = mergePreservedStripeConfig(store.clients[slug].stripeConfig, data.stripeConfig);
+            store.clients[slug] = {
+              ...store.clients[slug],
+              ...data,
+              slug,
+              ...(preservedStripe ? { stripeConfig: preservedStripe } : {}),
+            };
             await saveStore(storePath, store, env);
-            sendJson(res, 200, { ok: true, slug, client: store.clients[slug] });
+            sendJson(res, 200, { ok: true, slug, client: sanitizeClientForResponse(store.clients[slug]) });
             return;
           }
         }
@@ -5754,7 +5851,7 @@ function createServer(options = {}) {
         }
 
         if (method === 'GET' && (subRoute === '' || subRoute === 'sync')) {
-          sendJson(res, 200, { ok: true, slug, role: auth.role, client, updatedAt: store.updatedAt });
+          sendJson(res, 200, { ok: true, slug, role: auth.role, client: sanitizeClientForResponse(client), updatedAt: store.updatedAt });
           return;
         }
 
@@ -5762,14 +5859,58 @@ function createServer(options = {}) {
           const { data } = await readRequestBody(req);
           const incoming = data.client && typeof data.client === 'object' ? data.client : data;
           const preservedCode = client.accessCode;
+          const preservedStripe = mergePreservedStripeConfig(client.stripeConfig, incoming.stripeConfig);
           store.clients[slug] = {
             ...client,
             ...incoming,
             slug,
             accessCode: auth.role === 'admin' && incoming.accessCode ? incoming.accessCode : preservedCode,
+            ...(preservedStripe ? { stripeConfig: preservedStripe } : {}),
           };
           await saveStore(storePath, store, env);
-          sendJson(res, 200, { ok: true, slug, client: store.clients[slug], updatedAt: store.updatedAt });
+          sendJson(res, 200, { ok: true, slug, client: sanitizeClientForResponse(store.clients[slug]), updatedAt: store.updatedAt });
+          return;
+        }
+
+        if (method === 'POST' && subRoute === 'stripe-config') {
+          const { data } = await readRequestBody(req);
+          const pub = String(data.publishableKey || '').trim();
+          const sec = String(data.secretKey || '').trim();
+          const wh = String(data.webhookSecret || '').trim();
+          const payLink = String(data.paymentLink || '').trim();
+          const clearSecrets = data.clearSecrets === true;
+
+          if (pub && !pub.startsWith('pk_')) {
+            sendJson(res, 400, { ok: false, error: 'Publishable key must start with pk_' });
+            return;
+          }
+          if (sec && !sec.startsWith('sk_') && !sec.startsWith('rk_')) {
+            sendJson(res, 400, { ok: false, error: 'Secret key must start with sk_ or rk_' });
+            return;
+          }
+          if (wh && !wh.startsWith('whsec_')) {
+            sendJson(res, 400, { ok: false, error: 'Webhook signing secret must start with whsec_' });
+            return;
+          }
+          if (payLink && !/^https:\/\/[a-z0-9.-]+/i.test(payLink)) {
+            sendJson(res, 400, { ok: false, error: 'Payment Link must be a valid https:// URL' });
+            return;
+          }
+
+          const prev = client.stripeConfig && typeof client.stripeConfig === 'object' ? client.stripeConfig : {};
+          client.stripeConfig = {
+            publishableKey: data.publishableKey !== undefined ? pub : String(prev.publishableKey || ''),
+            paymentLink: data.paymentLink !== undefined ? payLink : String(prev.paymentLink || ''),
+            secretKey: clearSecrets ? '' : (sec || prev.secretKey || ''),
+            webhookSecret: clearSecrets ? '' : (wh || prev.webhookSecret || ''),
+            updatedAt: new Date().toISOString(),
+          };
+          await saveStore(storePath, store, env);
+          sendJson(res, 200, {
+            ok: true,
+            slug,
+            stripeConfig: sanitizeStripeConfig(client.stripeConfig),
+          });
           return;
         }
 
