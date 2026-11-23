@@ -3673,41 +3673,58 @@ async function sendTransactionalEmail({ to, subject, text, html, from, replyTo }
   const smtpSendImpl = ctx.smtpSendImpl || sendSmtpEmail;
   const defaultFrom = from || env.RESEND_FROM || env.SMTP_FROM || env.SMTP_USER || 'Rivvak Media <connect@rivvak.com>';
 
+  let resendFallbackError = '';
   if (env.RESEND_API_KEY) {
-    const resp = await fetchImpl('https://api.resend.com/emails', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${env.RESEND_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        from: defaultFrom,
-        to: [to],
-        subject,
-        text,
-        ...(html ? { html } : {}),
-        ...(replyTo ? { reply_to: replyTo } : {}),
-      }),
-    });
-    const data = await resp.json().catch(() => ({}));
-    if (!resp.ok) {
-      return {
-        ok: false,
-        statusCode: 502,
-        mode: 'resend_error',
-        error: data.message || 'Resend API error',
-        status: resp.status,
-        fromUsed: defaultFrom,
-      };
+    try {
+      const resp = await fetchImpl('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${env.RESEND_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          from: defaultFrom,
+          to: [to],
+          subject,
+          text,
+          ...(html ? { html } : {}),
+          ...(replyTo ? { reply_to: replyTo } : {}),
+        }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (resp.ok) {
+        return {
+          ok: true,
+          statusCode: 200,
+          mode: 'live_resend',
+          id: data.id,
+          messageId: data.id,
+          fromUsed: defaultFrom,
+        };
+      }
+      resendFallbackError = data.message || `Resend HTTP ${resp.status}`;
+      if (!isSmtpConfigured(env)) {
+        return {
+          ok: false,
+          statusCode: 502,
+          mode: 'resend_error',
+          error: resendFallbackError,
+          status: resp.status,
+          fromUsed: defaultFrom,
+        };
+      }
+    } catch (err) {
+      resendFallbackError = err.message || 'Resend request failed';
+      if (!isSmtpConfigured(env)) {
+        return {
+          ok: false,
+          statusCode: 502,
+          mode: 'resend_error',
+          error: resendFallbackError,
+          fromUsed: defaultFrom,
+        };
+      }
     }
-    return {
-      ok: true,
-      statusCode: 200,
-      mode: 'live_resend',
-      id: data.id,
-      messageId: data.id,
-      fromUsed: defaultFrom,
-    };
   }
 
   if (isSmtpConfigured(env)) {
@@ -3736,6 +3753,7 @@ async function sendTransactionalEmail({ to, subject, text, html, from, replyTo }
         messageId: smtpRes.messageId,
         response: smtpRes.response,
         fromUsed: smtpSender,
+        ...(resendFallbackError ? { resendFallbackError } : {}),
       };
     } catch (err) {
       return {
