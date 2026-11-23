@@ -31,6 +31,11 @@ const MAX_PUBLIC_LEADS = 500;
 const MAX_STRIPE_EVENTS = 200;
 const LEAD_RATE_WINDOW_MS = 10 * 60 * 1000;
 const LEAD_RATE_MAX_REQUESTS = 10;
+const TRACK_RATE_WINDOW_MS = 60 * 1000;
+const TRACK_RATE_MAX_REQUESTS = 120;
+const MAX_ANALYTICS_DAYS = 180;
+const MAX_ANALYTICS_DAILY_IDS = 2000;
+const ANALYTICS_CACHE_TTL_MS = 5 * 60 * 1000;
 const VALID_LEAD_STATUSES = new Set(['new', 'contacted', 'qualified', 'won', 'archived']);
 const HANDLED_STRIPE_EVENTS = new Set([
   'checkout.session.completed',
@@ -1069,6 +1074,11 @@ function createDefaultStore(env = process.env) {
       },
     ],
     stripeEvents: [],
+    analytics: {
+      days: {},
+      recentEvents: [],
+      updatedAt: null,
+    },
   };
 }
 
@@ -1116,6 +1126,15 @@ function normalizeStoreShape(parsed, env = process.env) {
   }
   if (!Array.isArray(parsed.stripeEvents)) {
     parsed.stripeEvents = [];
+  }
+  if (!parsed.analytics || typeof parsed.analytics !== 'object' || Array.isArray(parsed.analytics)) {
+    parsed.analytics = { days: {}, recentEvents: [], updatedAt: null };
+  }
+  if (!parsed.analytics.days || typeof parsed.analytics.days !== 'object' || Array.isArray(parsed.analytics.days)) {
+    parsed.analytics.days = {};
+  }
+  if (!Array.isArray(parsed.analytics.recentEvents)) {
+    parsed.analytics.recentEvents = [];
   }
   if (!parsed.version) {
     parsed.version = 2;
@@ -1495,10 +1514,20 @@ function isLiveEmailConfigured(env = process.env) {
 
 const INTEGRATION_CATALOG = [
   {
+    id: 'rivvak-first-party-analytics',
+    name: 'Rivvak First-Party Analytics',
+    category: 'Core Platform',
+    keys: ['DATABASE_URL'],
+    alwaysActive: true,
+    setupUrl: 'https://rivvak.com/dashboard?tab=integrations',
+    unlocks: 'Server-persisted storefront traffic, engaged sessions, conversions, top pages & attribution without 3rd-party cookies',
+  },
+  {
     id: 'neon-postgresql',
     name: 'Neon PostgreSQL',
     category: 'Core Platform',
     keys: ['DATABASE_URL'],
+    setupUrl: 'https://console.neon.tech/',
     unlocks: 'Persistent cloud store (rivvak_store) across deploys & restarts',
   },
   {
@@ -1506,6 +1535,7 @@ const INTEGRATION_CATALOG = [
     name: 'PrivateEmail SMTP',
     category: 'Core Platform',
     keys: ['SMTP_HOST', 'SMTP_USER', 'SMTP_PASS'],
+    setupUrl: 'https://ap.www.namecheap.com/',
     unlocks: 'Instant lead alerts, 72-hour auto-reply receipts & client emails',
   },
   {
@@ -1518,6 +1548,7 @@ const INTEGRATION_CATALOG = [
       IMAP_USER: 'SMTP_USER',
       IMAP_PASS: 'SMTP_PASS',
     },
+    setupUrl: 'https://ap.www.namecheap.com/',
     unlocks: 'Read-only connect@rivvak.com inbox summary inside Partner Dashboard',
   },
   {
@@ -1525,6 +1556,7 @@ const INTEGRATION_CATALOG = [
     name: 'Shopify Storefront CORS',
     category: 'Core Platform',
     keys: ['ALLOWED_ORIGINS'],
+    setupUrl: 'https://admin.shopify.com/store/fdguvq-yv/themes',
     unlocks: 'Authorized cross-origin browser requests from Shopify & rivvak.com',
   },
   {
@@ -1532,6 +1564,10 @@ const INTEGRATION_CATALOG = [
     name: 'Google Analytics 4',
     category: 'Analytics & Ads',
     keys: ['GA4_PROPERTY_ID', 'GA4_SERVICE_ACCOUNT_JSON'],
+    fallbacks: {
+      GA4_SERVICE_ACCOUNT_JSON: 'GOOGLE_SERVICE_ACCOUNT_JSON',
+    },
+    setupUrl: 'https://analytics.google.com/analytics/web/',
     unlocks: 'Overview Column 1: Engaged Sessions, Engagement Rate, Sessions & Total Users',
   },
   {
@@ -1545,6 +1581,7 @@ const INTEGRATION_CATALOG = [
       'GOOGLE_ADS_REFRESH_TOKEN',
       'GOOGLE_ADS_CUSTOMER_ID',
     ],
+    setupUrl: 'https://ads.google.com/aw/overview',
     unlocks: 'Overview Column 2: Ad Clicks, Spend/MRR, Conversions & Top Campaigns',
   },
   {
@@ -1552,6 +1589,7 @@ const INTEGRATION_CATALOG = [
     name: 'Meta / Facebook & Instagram',
     category: 'Analytics & Ads',
     keys: ['META_ACCESS_TOKEN', 'META_AD_ACCOUNT_ID', 'META_IG_USER_ID', 'META_VERIFY_TOKEN'],
+    setupUrl: 'https://business.facebook.com/events_manager2',
     unlocks: 'Overview Column 3: Followers, Engagement, Impressions, IG DMs & Meta Ads',
   },
   {
@@ -1559,6 +1597,7 @@ const INTEGRATION_CATALOG = [
     name: 'TikTok Business',
     category: 'Analytics & Ads',
     keys: ['TIKTOK_ACCESS_TOKEN', 'TIKTOK_ADVERTISER_ID'],
+    setupUrl: 'https://ads.tiktok.com/i18n/events_manager/',
     unlocks: 'Short-form Reels & TikTok ad attribution metrics',
   },
   {
@@ -1566,6 +1605,10 @@ const INTEGRATION_CATALOG = [
     name: 'Google Search Console & GBP',
     category: 'Analytics & Ads',
     keys: ['GSC_SITE_URL', 'GOOGLE_SERVICE_ACCOUNT_JSON'],
+    fallbacks: {
+      GOOGLE_SERVICE_ACCOUNT_JSON: 'GA4_SERVICE_ACCOUNT_JSON',
+    },
+    setupUrl: 'https://search.google.com/search-console?resource_id=https%3A%2F%2Frivvak.com%2F',
     unlocks: 'Organic search impressions, Map-Pack visibility & Google Business reviews',
   },
   {
@@ -1573,6 +1616,7 @@ const INTEGRATION_CATALOG = [
     name: 'Stripe Billing & Webhooks',
     category: 'Billing, SMS & Automation',
     keys: ['STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET'],
+    setupUrl: 'https://dashboard.stripe.com/apikeys',
     unlocks: 'Verified retainer billing, checkout status & automated invoice ledger',
   },
   {
@@ -1580,6 +1624,7 @@ const INTEGRATION_CATALOG = [
     name: 'Twilio SMS',
     category: 'Billing, SMS & Automation',
     keys: ['TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_FROM_NUMBER'],
+    setupUrl: 'https://console.twilio.com/',
     unlocks: 'Live 2-way SMS inbox, missed-call text-back & booking reminders',
   },
   {
@@ -1587,6 +1632,7 @@ const INTEGRATION_CATALOG = [
     name: 'Resend Email',
     category: 'Billing, SMS & Automation',
     keys: ['RESEND_API_KEY', 'RESEND_FROM'],
+    setupUrl: 'https://resend.com/api-keys',
     unlocks: 'High-deliverability HTTP transactional email dispatch',
   },
   {
@@ -1594,6 +1640,7 @@ const INTEGRATION_CATALOG = [
     name: 'Make / n8n Webhook Bridge',
     category: 'Billing, SMS & Automation',
     keys: ['WEBHOOK_URL'],
+    setupUrl: 'https://www.make.com/en/scenarios',
     unlocks: 'Outbound workflow forwarding to Make.com, n8n, or Zapier',
   },
 ];
@@ -1617,13 +1664,17 @@ function buildIntegrationsStatus(env = process.env) {
     const presentKeys = [];
     const missingKeys = [];
     let usedFallback = false;
+    const fallbackSources = new Set();
 
     for (const key of item.keys) {
       const direct = hasEnv(key);
       const fallbackKey = item.fallbacks && item.fallbacks[key];
       const viaFallback = !direct && Boolean(fallbackKey && hasEnv(fallbackKey));
       const configured = direct || viaFallback;
-      if (viaFallback) usedFallback = true;
+      if (viaFallback) {
+        usedFallback = true;
+        fallbackSources.add(fallbackKey);
+      }
       envFlags[key] = configured;
       const entry = { key, configured };
       if (viaFallback) entry.fallbackFrom = fallbackKey;
@@ -1635,7 +1686,7 @@ function buildIntegrationsStatus(env = process.env) {
       }
     }
 
-    const connected = missingKeys.length === 0;
+    const connected = Boolean(item.alwaysActive) || missingKeys.length === 0;
     if (connected) connectedCount++;
 
     const out = {
@@ -1650,10 +1701,18 @@ function buildIntegrationsStatus(env = process.env) {
       missingKeys,
       env: envFlags,
       envVars,
+      setupUrl: item.setupUrl || '',
       unlocks: item.unlocks,
     };
-    if (usedFallback) {
-      out.note = 'Active using SMTP_HOST / SMTP_USER / SMTP_PASS fallback credentials';
+    if (item.id === 'rivvak-first-party-analytics') {
+      out.note = hasEnv('DATABASE_URL')
+        ? 'Live first-party storefront beacon persisted in Neon PostgreSQL'
+        : 'Live first-party storefront beacon active via JSON store fallback';
+    } else if (usedFallback) {
+      out.note =
+        fallbackSources.has('GOOGLE_SERVICE_ACCOUNT_JSON') || fallbackSources.has('GA4_SERVICE_ACCOUNT_JSON')
+          ? 'Active using shared Google Service Account JSON'
+          : 'Active using SMTP_HOST / SMTP_USER / SMTP_PASS fallback credentials';
     }
     return out;
   });
@@ -1667,6 +1726,775 @@ function buildIntegrationsStatus(env = process.env) {
       total,
     },
     integrations,
+    timestamp: new Date().toISOString(),
+  };
+}
+
+/**
+ * Clean a tracked storefront pathname and collapse external origins.
+ */
+function cleanAnalyticsPath(rawPath) {
+  let s = String(rawPath || '/').trim();
+  if (!s) return '/';
+  if (/^https?:\/\//i.test(s)) {
+    try {
+      const parsed = new URL(s);
+      s = parsed.pathname || '/';
+    } catch (_) {
+      s = '/';
+    }
+  }
+  const qIdx = s.indexOf('?');
+  if (qIdx !== -1) s = s.slice(0, qIdx);
+  const hIdx = s.indexOf('#');
+  if (hIdx !== -1) s = s.slice(0, hIdx);
+  if (!s.startsWith('/')) s = `/${s}`;
+  if (s.length > 180) s = s.slice(0, 180);
+  return s || '/';
+}
+
+/**
+ * Infer a normalized Rivvak client slug from explicit payload fields or path.
+ */
+function inferAnalyticsClientSlug(rawClient, cleanPath = '/') {
+  const explicit = String(rawClient || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-_]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 64);
+  if (explicit && explicit !== 'all') return explicit;
+  const p = String(cleanPath || '/').toLowerCase();
+  if (p.includes('/demo/pool') || p.includes('blue-diamond')) return 'blue-diamond-pools';
+  if (p.includes('/demo/gym') || p.includes('luxe-fitness')) return 'luxe-fitness';
+  if (p.includes('/demo/electric') || p.includes('/demo/powerwash') || p.includes('vortex')) return 'vortex-electric';
+  if (p.includes('/client')) return 'client-portal';
+  return 'rivvak';
+}
+
+/**
+ * Infer normalized acquisition source channel from UTM tags or HTTP referrer.
+ */
+function inferAnalyticsSource(payload = {}, req = null) {
+  const explicit = String(payload.source || payload.utmSource || '').trim();
+  const lowExplicit = explicit.toLowerCase();
+  if (lowExplicit) {
+    if (lowExplicit.includes('google') && (lowExplicit.includes('cpc') || lowExplicit.includes('ads'))) return 'Google Ads';
+    if (lowExplicit.includes('google')) return 'Organic Search';
+    if (lowExplicit.includes('facebook') || lowExplicit.includes('instagram') || lowExplicit.includes('meta') || lowExplicit === 'fb' || lowExplicit === 'ig') return 'Meta / IG';
+    if (lowExplicit.includes('tiktok') || lowExplicit === 'tt') return 'TikTok';
+    if (lowExplicit === 'direct') return 'Direct';
+    return explicit.slice(0, 60);
+  }
+  const ref = String(payload.referrer || req?.headers?.referer || '').trim().toLowerCase();
+  if (!ref) return 'Direct';
+  let host = ref;
+  if (/^https?:\/\//i.test(ref)) {
+    try {
+      host = new URL(ref).hostname.toLowerCase();
+    } catch (_) {
+      host = ref;
+    }
+  }
+  if (!host || host.includes('rivvak.com') || host.includes('myshopify.com') || host.includes('localhost') || host.includes('127.0.0.1')) {
+    return 'Direct';
+  }
+  if (host.includes('google.') || host.includes('bing.com') || host.includes('duckduckgo.') || host.includes('yahoo.')) {
+    return 'Organic Search';
+  }
+  if (host.includes('instagram.') || host.includes('facebook.') || host.includes('fb.') || host.includes('l.instagram.')) {
+    return 'Meta / IG';
+  }
+  if (host.includes('tiktok.')) return 'TikTok';
+  return `Referral (${host.slice(0, 48)})`;
+}
+
+/**
+ * Infer normalized device bucket from explicit value or User-Agent header.
+ */
+function inferAnalyticsDevice(rawDevice, req = null) {
+  const d = String(rawDevice || '').trim().toLowerCase();
+  if (d === 'mobile' || d === 'desktop' || d === 'tablet') return d;
+  const ua = String(req?.headers?.['user-agent'] || '').toLowerCase();
+  if (/ipad|tablet|playbook|silk/i.test(ua)) return 'tablet';
+  if (/mobi|iphone|android/i.test(ua)) return 'mobile';
+  return 'desktop';
+}
+
+function ensureAnalyticsDayBucket(container, key) {
+  if (!container[key] || typeof container[key] !== 'object') {
+    container[key] = {
+      pageviews: 0,
+      engaged: 0,
+      conversions: 0,
+      clicks: 0,
+      anonSessions: 0,
+      anonUsers: 0,
+      anonEngaged: 0,
+      sessionIds: [],
+      visitorIds: [],
+      engagedSessionIds: [],
+      pages: {},
+      sources: {},
+      devices: { mobile: 0, desktop: 0, tablet: 0 },
+      clients: {},
+    };
+  }
+  const b = container[key];
+  if (!Array.isArray(b.sessionIds)) b.sessionIds = [];
+  if (!Array.isArray(b.visitorIds)) b.visitorIds = [];
+  if (!Array.isArray(b.engagedSessionIds)) b.engagedSessionIds = [];
+  if (!b.pages || typeof b.pages !== 'object') b.pages = {};
+  if (!b.sources || typeof b.sources !== 'object') b.sources = {};
+  if (!b.devices || typeof b.devices !== 'object') b.devices = { mobile: 0, desktop: 0, tablet: 0 };
+  if (!b.clients || typeof b.clients !== 'object') b.clients = {};
+  return b;
+}
+
+function ensureClientDayBucket(dayBucket, clientSlug) {
+  if (!dayBucket.clients[clientSlug] || typeof dayBucket.clients[clientSlug] !== 'object') {
+    dayBucket.clients[clientSlug] = {
+      pageviews: 0,
+      engaged: 0,
+      conversions: 0,
+      clicks: 0,
+      anonSessions: 0,
+      anonUsers: 0,
+      anonEngaged: 0,
+      sessionIds: [],
+      visitorIds: [],
+      engagedSessionIds: [],
+      pages: {},
+      sources: {},
+      devices: { mobile: 0, desktop: 0, tablet: 0 },
+    };
+  }
+  const c = dayBucket.clients[clientSlug];
+  if (!Array.isArray(c.sessionIds)) c.sessionIds = [];
+  if (!Array.isArray(c.visitorIds)) c.visitorIds = [];
+  if (!Array.isArray(c.engagedSessionIds)) c.engagedSessionIds = [];
+  if (!c.pages || typeof c.pages !== 'object') c.pages = {};
+  if (!c.sources || typeof c.sources !== 'object') c.sources = {};
+  if (!c.devices || typeof c.devices !== 'object') c.devices = { mobile: 0, desktop: 0, tablet: 0 };
+  return c;
+}
+
+function pushBoundedUnique(arr, id, limit = MAX_ANALYTICS_DAILY_IDS) {
+  if (!id || typeof id !== 'string') return false;
+  if (arr.includes(id)) return false;
+  if (arr.length < limit) {
+    arr.push(id);
+    return true;
+  }
+  return false;
+}
+
+function incrementBoundedMap(mapObj, key, maxKeys = 50) {
+  if (!key) return;
+  if (Object.prototype.hasOwnProperty.call(mapObj, key)) {
+    mapObj[key] = Number(mapObj[key] || 0) + 1;
+    return;
+  }
+  if (Object.keys(mapObj).length < maxKeys) {
+    mapObj[key] = 1;
+  } else {
+    mapObj['Other'] = Number(mapObj['Other'] || 0) + 1;
+  }
+}
+
+/**
+ * Record one first-party analytics beacon event into store.analytics (retaining max 180 UTC days).
+ * @param {object} store
+ * @param {object} payload
+ * @param {http.IncomingMessage|null} req
+ */
+function recordAnalyticsEvent(store, payload = {}, req = null) {
+  if (!store.analytics || typeof store.analytics !== 'object') {
+    store.analytics = { days: {}, recentEvents: [], updatedAt: null };
+  }
+  if (!store.analytics.days || typeof store.analytics.days !== 'object') {
+    store.analytics.days = {};
+  }
+  if (!Array.isArray(store.analytics.recentEvents)) {
+    store.analytics.recentEvents = [];
+  }
+
+  const rawType = String(payload.type || 'pageview').trim().toLowerCase();
+  const type = ['pageview', 'engaged', 'conversion', 'lead', 'click'].includes(rawType) ? rawType : 'pageview';
+  const normalizedType = type === 'lead' ? 'conversion' : type;
+  const cleanPath = cleanAnalyticsPath(payload.path || payload.pageUrl || '/');
+  const clientSlug = inferAnalyticsClientSlug(payload.client, cleanPath);
+  const source = inferAnalyticsSource(payload, req);
+  const device = inferAnalyticsDevice(payload.device, req);
+  const sessionId = String(payload.sessionId || '').trim().slice(0, 64);
+  const visitorId = String(payload.visitorId || '').trim().slice(0, 64);
+  const label = String(payload.label || '').trim().slice(0, 80);
+
+  const nowIso = new Date().toISOString();
+  const dayKey = nowIso.slice(0, 10);
+  const dayBucket = ensureAnalyticsDayBucket(store.analytics.days, dayKey);
+  const clientBucket = ensureClientDayBucket(dayBucket, clientSlug);
+
+  const applyToTarget = (target) => {
+    if (sessionId) {
+      pushBoundedUnique(target.sessionIds, sessionId, MAX_ANALYTICS_DAILY_IDS);
+    } else if (normalizedType === 'pageview') {
+      target.anonSessions = Number(target.anonSessions || 0) + 1;
+    }
+
+    if (visitorId) {
+      pushBoundedUnique(target.visitorIds, visitorId, MAX_ANALYTICS_DAILY_IDS);
+    } else if (normalizedType === 'pageview') {
+      target.anonUsers = Number(target.anonUsers || 0) + 1;
+    }
+
+    if (normalizedType === 'pageview') {
+      target.pageviews = Number(target.pageviews || 0) + 1;
+      incrementBoundedMap(target.pages, cleanPath, 50);
+      incrementBoundedMap(target.sources, source, 25);
+      target.devices[device] = Number(target.devices[device] || 0) + 1;
+    } else if (normalizedType === 'engaged') {
+      if (sessionId) {
+        const added = pushBoundedUnique(target.engagedSessionIds, sessionId, MAX_ANALYTICS_DAILY_IDS);
+        if (added) target.engaged = Number(target.engaged || 0) + 1;
+      } else {
+        target.anonEngaged = Number(target.anonEngaged || 0) + 1;
+        target.engaged = Number(target.engaged || 0) + 1;
+      }
+    } else if (normalizedType === 'conversion') {
+      target.conversions = Number(target.conversions || 0) + 1;
+    } else if (normalizedType === 'click') {
+      target.clicks = Number(target.clicks || 0) + 1;
+    }
+  };
+
+  applyToTarget(dayBucket);
+  applyToTarget(clientBucket);
+
+  store.analytics.recentEvents.unshift({
+    at: nowIso,
+    type: normalizedType,
+    path: cleanPath,
+    client: clientSlug,
+    source,
+    device,
+    label,
+  });
+  if (store.analytics.recentEvents.length > 50) {
+    store.analytics.recentEvents = store.analytics.recentEvents.slice(0, 50);
+  }
+  store.analytics.updatedAt = nowIso;
+
+  const allDayKeys = Object.keys(store.analytics.days).sort();
+  if (allDayKeys.length > MAX_ANALYTICS_DAYS) {
+    const pruneCount = allDayKeys.length - MAX_ANALYTICS_DAYS;
+    for (let i = 0; i < pruneCount; i++) {
+      delete store.analytics.days[allDayKeys[i]];
+    }
+  }
+
+  return { day: dayKey, type: normalizedType, path: cleanPath, client: clientSlug, source, device };
+}
+
+/**
+ * Aggregate stored first-party analytics over 7d, 30d, or 90d (optionally filtered by client slug).
+ */
+function aggregateFirstPartyAnalytics(store, rangeKey = '30d', clientFilter = 'all') {
+  const daysMap = store?.analytics?.days && typeof store.analytics.days === 'object' ? store.analytics.days : {};
+  const dayCount = rangeKey === '7d' ? 7 : rangeKey === '90d' ? 90 : 30;
+  const filterSlug = String(clientFilter || 'all').trim().toLowerCase();
+
+  const dates = [];
+  const now = new Date();
+  for (let offset = dayCount - 1; offset >= 0; offset--) {
+    const dt = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - offset));
+    dates.push(dt.toISOString().slice(0, 10));
+  }
+
+  let pageviews = 0;
+  let sessions = 0;
+  let engagedSessions = 0;
+  let totalUsers = 0;
+  let conversions = 0;
+  let clicks = 0;
+  const pageTotals = {};
+  const sourceTotals = {};
+  const deviceTotals = { mobile: 0, desktop: 0, tablet: 0 };
+  const byClient = {};
+  const dailySeries = [];
+
+  for (const dateKey of dates) {
+    const rawDay = daysMap[dateKey];
+    let dayTarget = rawDay || null;
+    if (rawDay && filterSlug && filterSlug !== 'all') {
+      dayTarget = rawDay.clients && rawDay.clients[filterSlug] ? rawDay.clients[filterSlug] : null;
+    }
+
+    if (rawDay && rawDay.clients && typeof rawDay.clients === 'object') {
+      for (const [cSlug, cBucket] of Object.entries(rawDay.clients)) {
+        if (!byClient[cSlug]) {
+          byClient[cSlug] = { pageviews: 0, sessions: 0, engagedSessions: 0, totalUsers: 0, conversions: 0, clicks: 0 };
+        }
+        const cSessions = (Array.isArray(cBucket.sessionIds) ? cBucket.sessionIds.length : 0) + Number(cBucket.anonSessions || 0);
+        const cUsers = (Array.isArray(cBucket.visitorIds) ? cBucket.visitorIds.length : 0) + Number(cBucket.anonUsers || 0);
+        const cEngagedRaw =
+          (Array.isArray(cBucket.engagedSessionIds) ? cBucket.engagedSessionIds.length : 0) +
+          Number(cBucket.anonEngaged || 0);
+        const cEngaged = Math.min(cSessions, Math.max(cEngagedRaw, Number(cBucket.engaged || 0)));
+        byClient[cSlug].pageviews += Number(cBucket.pageviews || 0);
+        byClient[cSlug].sessions += cSessions;
+        byClient[cSlug].totalUsers += cUsers;
+        byClient[cSlug].engagedSessions += cEngaged;
+        byClient[cSlug].conversions += Number(cBucket.conversions || 0);
+        byClient[cSlug].clicks += Number(cBucket.clicks || 0);
+      }
+    }
+
+    const dSessions = dayTarget
+      ? (Array.isArray(dayTarget.sessionIds) ? dayTarget.sessionIds.length : 0) + Number(dayTarget.anonSessions || 0)
+      : 0;
+    const dUsers = dayTarget
+      ? (Array.isArray(dayTarget.visitorIds) ? dayTarget.visitorIds.length : 0) + Number(dayTarget.anonUsers || 0)
+      : 0;
+    const dEngagedRaw = dayTarget
+      ? (Array.isArray(dayTarget.engagedSessionIds) ? dayTarget.engagedSessionIds.length : 0) + Number(dayTarget.anonEngaged || 0)
+      : 0;
+    const dEngaged = Math.min(dSessions, Math.max(dEngagedRaw, Number(dayTarget?.engaged || 0)));
+    const dPageviews = dayTarget ? Number(dayTarget.pageviews || 0) : 0;
+    const dConversions = dayTarget ? Number(dayTarget.conversions || 0) : 0;
+    const dClicks = dayTarget ? Number(dayTarget.clicks || 0) : 0;
+
+    pageviews += dPageviews;
+    sessions += dSessions;
+    engagedSessions += dEngaged;
+    totalUsers += dUsers;
+    conversions += dConversions;
+    clicks += dClicks;
+
+    if (dayTarget) {
+      for (const [p, cnt] of Object.entries(dayTarget.pages || {})) {
+        pageTotals[p] = (pageTotals[p] || 0) + Number(cnt || 0);
+      }
+      for (const [src, cnt] of Object.entries(dayTarget.sources || {})) {
+        sourceTotals[src] = (sourceTotals[src] || 0) + Number(cnt || 0);
+      }
+      deviceTotals.mobile += Number(dayTarget.devices?.mobile || 0);
+      deviceTotals.desktop += Number(dayTarget.devices?.desktop || 0);
+      deviceTotals.tablet += Number(dayTarget.devices?.tablet || 0);
+    }
+
+    dailySeries.push({
+      date: dateKey,
+      label: `${dateKey.slice(5, 7)}/${dateKey.slice(8, 10)}`,
+      sessions: dSessions,
+      engagedSessions: dEngaged,
+      pageviews: dPageviews,
+      totalUsers: dUsers,
+      conversions: dConversions,
+      clicks: dClicks,
+    });
+  }
+
+  for (const metrics of Object.values(byClient)) {
+    metrics.engagementRate = metrics.sessions > 0 ? Number(((metrics.engagedSessions / metrics.sessions) * 100).toFixed(2)) : 0;
+  }
+
+  const sortPairs = (obj, labelKey) =>
+    Object.entries(obj)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 6)
+      .map(([k, count]) => ({ [labelKey]: k, count }));
+
+  return {
+    connected: true,
+    range: `${dayCount}d`,
+    client: filterSlug || 'all',
+    sessions,
+    engagedSessions,
+    engagementRate: sessions > 0 ? Number(((engagedSessions / sessions) * 100).toFixed(2)) : 0,
+    pageviews,
+    totalUsers,
+    conversions,
+    clicks,
+    dailySeries,
+    topPages: sortPairs(pageTotals, 'path'),
+    topSources: sortPairs(sourceTotals, 'source'),
+    devices: deviceTotals,
+    byClient,
+    recentEvents: (store?.analytics?.recentEvents || []).slice(0, 20),
+    updatedAt: store?.analytics?.updatedAt || null,
+  };
+}
+
+/**
+ * Parse a Google Service Account JSON string (supports raw JSON or base64-encoded JSON).
+ */
+function parseGoogleServiceAccountJson(raw) {
+  if (!raw || typeof raw !== 'string') return null;
+  let text = raw.trim();
+  if (!text) return null;
+  if (!text.startsWith('{')) {
+    try {
+      text = Buffer.from(text, 'base64').toString('utf8').trim();
+    } catch (_) {
+      return null;
+    }
+  }
+  try {
+    const parsed = JSON.parse(text);
+    if (!parsed.client_email || !parsed.private_key) return null;
+    parsed.private_key = String(parsed.private_key).replace(/\\n/g, '\n');
+    return parsed;
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * Exchange a signed RSA-SHA256 JWT assertion for a short-lived Google OAuth2 access token (zero deps).
+ */
+async function getGoogleServiceAccessToken(env, scopes, fetchImpl, cache) {
+  const rawJson = String(env.GA4_SERVICE_ACCOUNT_JSON || env.GOOGLE_SERVICE_ACCOUNT_JSON || '').trim();
+  const sa = parseGoogleServiceAccountJson(rawJson);
+  if (!sa) return { ok: false, error: 'Missing or invalid Service Account JSON' };
+
+  const scopeKey = `google_token:${sa.client_email}:${scopes.join(',')}`;
+  const cached = cache.get(scopeKey);
+  if (cached && cached.expiresAt > Date.now() + 60 * 1000) {
+    return { ok: true, accessToken: cached.accessToken };
+  }
+
+  const nowSec = Math.floor(Date.now() / 1000);
+  const headerB64 = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url');
+  const claimB64 = Buffer.from(
+    JSON.stringify({
+      iss: sa.client_email,
+      scope: scopes.join(' '),
+      aud: sa.token_uri || 'https://oauth2.googleapis.com/token',
+      exp: nowSec + 3600,
+      iat: nowSec,
+    })
+  ).toString('base64url');
+  const signingInput = `${headerB64}.${claimB64}`;
+  const signer = crypto.createSign('RSA-SHA256');
+  signer.update(signingInput);
+  const signatureB64 = signer.sign(sa.private_key, 'base64url');
+  const assertion = `${signingInput}.${signatureB64}`;
+
+  const tokenUrl = sa.token_uri || 'https://oauth2.googleapis.com/token';
+  const body = `grant_type=${encodeURIComponent('urn:ietf:params:oauth:grant-type:jwt-bearer')}&assertion=${encodeURIComponent(assertion)}`;
+  const res = await fetchImpl(tokenUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body,
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok || !json?.access_token) {
+    return { ok: false, error: json?.error_description || json?.error || `Google OAuth HTTP ${res.status}` };
+  }
+  const expiresInMs = Number(json.expires_in || 3600) * 1000;
+  cache.set(scopeKey, { accessToken: json.access_token, expiresAt: Date.now() + expiresInMs });
+  return { ok: true, accessToken: json.access_token };
+}
+
+/**
+ * Fetch live GA4 Data API v1beta report when GA4_PROPERTY_ID and Service Account JSON are configured.
+ */
+async function fetchLiveGa4Overview(env, rangeKey, fetchImpl, cache) {
+  const propertyId = String(env.GA4_PROPERTY_ID || '').trim().replace(/^properties\//, '');
+  const saRaw = String(env.GA4_SERVICE_ACCOUNT_JSON || env.GOOGLE_SERVICE_ACCOUNT_JSON || '').trim();
+  if (!propertyId || !saRaw) {
+    return { connected: false, reason: 'missing_credentials' };
+  }
+  const dayCount = rangeKey === '7d' ? 7 : rangeKey === '90d' ? 90 : 30;
+  try {
+    const auth = await getGoogleServiceAccessToken(env, ['https://www.googleapis.com/auth/analytics.readonly'], fetchImpl, cache);
+    if (!auth.ok) return { connected: false, error: auth.error };
+
+    const res = await fetchImpl(`https://analyticsdata.googleapis.com/v1beta/properties/${encodeURIComponent(propertyId)}:runReport`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${auth.accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        dateRanges: [{ startDate: `${dayCount}daysAgo`, endDate: 'today' }],
+        dimensions: [{ name: 'date' }],
+        metrics: [
+          { name: 'engagedSessions' },
+          { name: 'engagementRate' },
+          { name: 'sessions' },
+          { name: 'totalUsers' },
+          { name: 'conversions' },
+          { name: 'screenPageViews' },
+        ],
+        orderBys: [{ dimension: { dimensionName: 'date' } }],
+      }),
+    });
+    const json = await res.json().catch(() => null);
+    if (!res.ok) {
+      return { connected: false, error: json?.error?.message || `GA4 API HTTP ${res.status}` };
+    }
+    const rows = Array.isArray(json?.rows) ? json.rows : [];
+    let engagedSessions = 0;
+    let sessions = 0;
+    let totalUsers = 0;
+    let conversions = 0;
+    let pageviews = 0;
+    const dailySeries = rows.map((row) => {
+      const rawDate = row.dimensionValues?.[0]?.value || '';
+      const dateIso = rawDate.length === 8 ? `${rawDate.slice(0, 4)}-${rawDate.slice(4, 6)}-${rawDate.slice(6, 8)}` : rawDate;
+      const vals = row.metricValues || [];
+      const eng = Number(vals[0]?.value || 0);
+      const ses = Number(vals[2]?.value || 0);
+      const usr = Number(vals[3]?.value || 0);
+      const conv = Number(vals[4]?.value || 0);
+      const pv = Number(vals[5]?.value || 0);
+      engagedSessions += eng;
+      sessions += ses;
+      totalUsers += usr;
+      conversions += conv;
+      pageviews += pv;
+      return {
+        date: dateIso,
+        label: dateIso.length >= 10 ? `${dateIso.slice(5, 7)}/${dateIso.slice(8, 10)}` : dateIso,
+        engagedSessions: eng,
+        sessions: ses,
+        totalUsers: usr,
+        conversions: conv,
+        pageviews: pv,
+      };
+    });
+    const engagementRate = sessions > 0 ? Number(((engagedSessions / sessions) * 100).toFixed(2)) : 0;
+    return {
+      connected: true,
+      propertyId,
+      engagedSessions,
+      engagementRate,
+      sessions,
+      totalUsers,
+      conversions,
+      pageviews,
+      dailySeries,
+    };
+  } catch (err) {
+    return { connected: false, error: err.message || 'GA4 fetch failed' };
+  }
+}
+
+/**
+ * Fetch live Google Search Console Search Analytics when GSC_SITE_URL and Service Account JSON are configured.
+ */
+async function fetchLiveGscOverview(env, rangeKey, fetchImpl, cache) {
+  const siteUrl = String(env.GSC_SITE_URL || '').trim();
+  const saRaw = String(env.GOOGLE_SERVICE_ACCOUNT_JSON || env.GA4_SERVICE_ACCOUNT_JSON || '').trim();
+  if (!siteUrl || !saRaw) {
+    return { connected: false, reason: 'missing_credentials', siteUrlConfigured: Boolean(siteUrl) };
+  }
+  const dayCount = rangeKey === '7d' ? 7 : rangeKey === '90d' ? 90 : 30;
+  const endDt = new Date();
+  const startDt = new Date(endDt.getTime() - dayCount * 86400000);
+  const startDate = startDt.toISOString().slice(0, 10);
+  const endDate = endDt.toISOString().slice(0, 10);
+
+  try {
+    const auth = await getGoogleServiceAccessToken(env, ['https://www.googleapis.com/auth/webmasters.readonly'], fetchImpl, cache);
+    if (!auth.ok) return { connected: false, siteUrl, error: auth.error };
+
+    const res = await fetchImpl(
+      `https://searchconsole.googleapis.com/webmasters/v3/sites/${encodeURIComponent(siteUrl)}/searchAnalytics/query`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${auth.accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ startDate, endDate, dimensions: ['date'] }),
+      }
+    );
+    const json = await res.json().catch(() => null);
+    if (!res.ok) {
+      return { connected: false, siteUrl, error: json?.error?.message || `GSC API HTTP ${res.status}` };
+    }
+    const rows = Array.isArray(json?.rows) ? json.rows : [];
+    let clicks = 0;
+    let impressions = 0;
+    const dailySeries = rows.map((r) => {
+      clicks += Number(r.clicks || 0);
+      impressions += Number(r.impressions || 0);
+      const d = r.keys?.[0] || '';
+      return {
+        date: d,
+        label: d.length >= 10 ? `${d.slice(5, 7)}/${d.slice(8, 10)}` : d,
+        clicks: Number(r.clicks || 0),
+        impressions: Number(r.impressions || 0),
+        ctr: Number(((r.ctr || 0) * 100).toFixed(2)),
+        position: Number((r.position || 0).toFixed(1)),
+      };
+    });
+    return {
+      connected: true,
+      siteUrl,
+      clicks,
+      impressions,
+      ctr: impressions > 0 ? Number(((clicks / impressions) * 100).toFixed(2)) : 0,
+      dailySeries,
+    };
+  } catch (err) {
+    return { connected: false, siteUrl, error: err.message || 'GSC fetch failed' };
+  }
+}
+
+/**
+ * Fetch live Meta IG & Ads insights when META_ACCESS_TOKEN and IG/Ad IDs are configured.
+ */
+async function fetchLiveMetaOverview(env, rangeKey, fetchImpl) {
+  const token = String(env.META_ACCESS_TOKEN || '').trim();
+  const igId = String(env.META_IG_USER_ID || '').trim();
+  const adIdRaw = String(env.META_AD_ACCOUNT_ID || '').trim();
+  if (!token || (!igId && !adIdRaw)) {
+    return { connected: false, reason: 'missing_credentials' };
+  }
+  const datePreset = rangeKey === '7d' ? 'last_7d' : rangeKey === '90d' ? 'last_90d' : 'last_30d';
+  const out = { connected: false, followers: 0, engagement: 0, impressions: 0, clicks: 0, spend: 0 };
+  try {
+    if (igId) {
+      const igRes = await fetchImpl(
+        `https://graph.facebook.com/v21.0/${encodeURIComponent(igId)}?fields=followers_count,media_count,username&access_token=${encodeURIComponent(token)}`
+      );
+      const igJson = await igRes.json().catch(() => null);
+      if (igRes.ok && igJson && !igJson.error) {
+        out.connected = true;
+        out.followers = Number(igJson.followers_count || 0);
+        out.mediaCount = Number(igJson.media_count || 0);
+        out.username = igJson.username || '';
+      } else if (igJson?.error) {
+        out.error = igJson.error.message;
+      }
+    }
+    if (adIdRaw) {
+      const adAccountId = adIdRaw.startsWith('act_') ? adIdRaw : `act_${adIdRaw}`;
+      const adsRes = await fetchImpl(
+        `https://graph.facebook.com/v21.0/${encodeURIComponent(adAccountId)}/insights?fields=impressions,clicks,spend,reach&date_preset=${datePreset}&access_token=${encodeURIComponent(token)}`
+      );
+      const adsJson = await adsRes.json().catch(() => null);
+      if (adsRes.ok && Array.isArray(adsJson?.data) && adsJson.data[0]) {
+        const row = adsJson.data[0];
+        out.connected = true;
+        out.impressions = Number(row.impressions || 0);
+        out.clicks = Number(row.clicks || 0);
+        out.spend = Number(row.spend || 0);
+        out.reach = Number(row.reach || 0);
+        out.engagement = Number(row.clicks || 0);
+      } else if (adsJson?.error && !out.error) {
+        out.error = adsJson.error.message;
+      }
+    }
+    return out;
+  } catch (err) {
+    return { connected: false, error: err.message || 'Meta Graph fetch failed' };
+  }
+}
+
+/**
+ * Fetch active Stripe recurring subscription MRR when STRIPE_SECRET_KEY is configured.
+ */
+async function fetchLiveStripeOverview(env, fetchImpl) {
+  const key = String(env.STRIPE_SECRET_KEY || '').trim();
+  if (!key) return { connected: false, reason: 'missing_credentials' };
+  try {
+    const res = await fetchImpl('https://api.stripe.com/v1/subscriptions?status=active&limit=100', {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${key}` },
+    });
+    const json = await res.json().catch(() => null);
+    if (!res.ok) {
+      return { connected: false, error: json?.error?.message || `Stripe HTTP ${res.status}` };
+    }
+    const items = Array.isArray(json?.data) ? json.data : [];
+    let mrr = 0;
+    for (const sub of items) {
+      for (const item of sub.items?.data || []) {
+        const amountCents = Number(item.price?.unit_amount || 0) * Number(item.quantity || 1);
+        const interval = item.price?.recurring?.interval || 'month';
+        const monthlyDollars = interval === 'year' ? amountCents / 100 / 12 : amountCents / 100;
+        mrr += monthlyDollars;
+      }
+    }
+    return {
+      connected: true,
+      activeSubscriptions: items.length,
+      mrr: Number(mrr.toFixed(2)),
+    };
+  } catch (err) {
+    return { connected: false, error: err.message || 'Stripe fetch failed' };
+  }
+}
+
+/**
+ * Build complete Partner Dashboard analytics overview (1st-party always live + 5-min cached external connectors).
+ */
+async function buildAnalyticsOverview({ store, env, range = '30d', client = 'all', refresh = false, fetchImpl = globalThis.fetch, cache = new Map() }) {
+  const firstParty = aggregateFirstPartyAnalytics(store, range, client);
+
+  const cachedRun = async (key, fn) => {
+    if (!refresh) {
+      const hit = cache.get(key);
+      if (hit && hit.expiresAt > Date.now()) {
+        return hit.value;
+      }
+    }
+    const value = await fn();
+    cache.set(key, { value, expiresAt: Date.now() + ANALYTICS_CACHE_TTL_MS });
+    return value;
+  };
+
+  const [ga4, gsc, meta, stripe] = await Promise.all([
+    cachedRun(`ga4:${range}`, () => fetchLiveGa4Overview(env, range, fetchImpl, cache)),
+    cachedRun(`gsc:${range}`, () => fetchLiveGscOverview(env, range, fetchImpl, cache)),
+    cachedRun(`meta:${range}`, () => fetchLiveMetaOverview(env, range, fetchImpl)),
+    cachedRun(`stripe:active`, () => fetchLiveStripeOverview(env, fetchImpl)),
+  ]);
+
+  const leadsList = Array.isArray(store?.publicLeads) ? store.publicLeads : [];
+  const sevenDaysAgoMs = Date.now() - 7 * 86400000;
+  let recent7dLeads = 0;
+  const leadsByStatus = {};
+  for (const ld of leadsList) {
+    const st = String(ld.status || 'new').toLowerCase();
+    leadsByStatus[st] = (leadsByStatus[st] || 0) + 1;
+    const ts = Date.parse(ld.createdAt || '');
+    if (Number.isFinite(ts) && ts >= sevenDaysAgoMs) recent7dLeads++;
+  }
+
+  const clientEntries = Object.values(store?.clients || {});
+  let activeClients = 0;
+  let activeMrr = 0;
+  for (const cl of clientEntries) {
+    if (String(cl.status || '').toLowerCase() === 'active') activeClients++;
+    activeMrr += Number(cl.retainer || 0);
+  }
+
+  return {
+    ok: true,
+    range: firstParty.range,
+    client: firstParty.client,
+    firstParty,
+    ga4,
+    gsc,
+    meta,
+    stripe,
+    leads: {
+      total: leadsList.length,
+      recent7d: recent7dLeads,
+      byStatus: leadsByStatus,
+    },
+    crm: {
+      totalClients: clientEntries.length,
+      activeClients,
+      activeMrr,
+    },
+    integrationsSummary: buildIntegrationsStatus(env).summary,
     timestamp: new Date().toISOString(),
   };
 }
@@ -3921,6 +4749,10 @@ function createServer(options = {}) {
   const leadRateWindowMs = Number(options.leadRateWindowMs || LEAD_RATE_WINDOW_MS);
   const leadRateMax = Number(options.leadRateMaxRequests || LEAD_RATE_MAX_REQUESTS);
   const leadRateLimiter = new Map();
+  const trackRateWindowMs = Number(options.trackRateWindowMs || TRACK_RATE_WINDOW_MS);
+  const trackRateMax = Number(options.trackRateMaxRequests || TRACK_RATE_MAX_REQUESTS);
+  const trackRateLimiter = new Map();
+  const analyticsCache = new Map();
 
   const getClientIp = (req) => {
     const xff = req.headers['x-forwarded-for'];
@@ -3930,26 +4762,29 @@ function createServer(options = {}) {
     return req.socket?.remoteAddress || 'unknown';
   };
 
-  const checkLeadRateLimit = (ip) => {
+  const checkSlidingRateLimit = (limiter, ip, windowMs, max) => {
     const nowMs = Date.now();
-    const prev = leadRateLimiter.get(ip) || [];
-    const recent = prev.filter((ts) => nowMs - ts < leadRateWindowMs);
-    if (recent.length >= leadRateMax) {
-      leadRateLimiter.set(ip, recent);
-      const retryAfterSec = Math.max(1, Math.ceil((recent[0] + leadRateWindowMs - nowMs) / 1000));
+    const prev = limiter.get(ip) || [];
+    const recent = prev.filter((ts) => nowMs - ts < windowMs);
+    if (recent.length >= max) {
+      limiter.set(ip, recent);
+      const retryAfterSec = Math.max(1, Math.ceil((recent[0] + windowMs - nowMs) / 1000));
       return { allowed: false, retryAfterSec };
     }
     recent.push(nowMs);
-    leadRateLimiter.set(ip, recent);
-    if (leadRateLimiter.size > 2000) {
-      for (const [k, list] of leadRateLimiter.entries()) {
-        if (!list.some((ts) => nowMs - ts < leadRateWindowMs)) {
-          leadRateLimiter.delete(k);
+    limiter.set(ip, recent);
+    if (limiter.size > 2000) {
+      for (const [k, list] of limiter.entries()) {
+        if (!list.some((ts) => nowMs - ts < windowMs)) {
+          limiter.delete(k);
         }
       }
     }
     return { allowed: true };
   };
+
+  const checkLeadRateLimit = (ip) => checkSlidingRateLimit(leadRateLimiter, ip, leadRateWindowMs, leadRateMax);
+  const checkTrackRateLimit = (ip) => checkSlidingRateLimit(trackRateLimiter, ip, trackRateWindowMs, trackRateMax);
 
   // Ensure store file exists at server creation
   const initialLoad = loadStore(storePath, env);
@@ -4012,12 +4847,14 @@ function createServer(options = {}) {
           endpoints: {
             health: '/api/health',
             publicLead: '/api/public/lead',
+            publicTrack: '/api/public/track',
             adminVerifyPasscode: '/api/admin/verify-passcode',
             state: '/api/state',
             adminClients: '/api/admin/clients',
             adminLeads: '/api/admin/leads',
             adminEmailInbox: '/api/admin/email-inbox',
             adminIntegrations: '/api/admin/integrations',
+            adminAnalyticsOverview: '/api/admin/analytics-overview',
             adminBackup: '/api/admin/backup',
             adminRestore: '/api/admin/restore',
             stripeWebhook: '/webhooks/stripe',
@@ -4265,6 +5102,20 @@ function createServer(options = {}) {
           }
         }
 
+        if (!data.analyticsTracked) {
+          recordAnalyticsEvent(
+            store,
+            {
+              type: 'conversion',
+              path: cleanPageUrl || '/',
+              client: data.client || undefined,
+              source: cleanSource || 'website-form',
+              label: cleanTicketId,
+            },
+            req
+          );
+        }
+
         await saveStore(storePath, store, env);
         sendJson(res, 201, {
           ok: true,
@@ -4273,6 +5124,34 @@ function createServer(options = {}) {
           emailDispatched,
           mode,
         });
+        return;
+      }
+
+      // First-Party Analytics Beacon Intake (POST /api/public/track, CORS-enabled)
+      if (method === 'POST' && pathname === '/api/public/track') {
+        const trackRate = checkTrackRateLimit(getClientIp(req));
+        if (!trackRate.allowed) {
+          sendJson(
+            res,
+            429,
+            { ok: false, error: 'Too Many Requests', message: 'Analytics rate limit reached.' },
+            { 'Retry-After': String(trackRate.retryAfterSec) }
+          );
+          return;
+        }
+        const { data } = await readRequestBody(req);
+        if (!data || typeof data !== 'object' || Array.isArray(data)) {
+          sendJson(res, 400, { ok: false, error: 'JSON payload object required.' });
+          return;
+        }
+        const hpVal = String(data._hp ?? data.honeypot ?? '').trim();
+        if (hpVal.length > 0) {
+          sendJson(res, 200, { ok: true, ignored: true });
+          return;
+        }
+        const recorded = recordAnalyticsEvent(store, data, req);
+        await saveStore(storePath, store, env);
+        sendJson(res, 200, { ok: true, recorded: true, ...recorded });
         return;
       }
 
@@ -4768,6 +5647,23 @@ function createServer(options = {}) {
           return;
         }
 
+        if (method === 'GET' && pathname === '/api/admin/analytics-overview') {
+          const range = ['7d', '30d', '90d'].includes(queryParams.range) ? queryParams.range : '30d';
+          const clientFilter = String(queryParams.client || 'all').trim() || 'all';
+          const refresh = queryParams.refresh === '1' || queryParams.refresh === 'true';
+          const overview = await buildAnalyticsOverview({
+            store,
+            env,
+            range,
+            client: clientFilter,
+            refresh,
+            fetchImpl,
+            cache: analyticsCache,
+          });
+          sendJson(res, 200, overview);
+          return;
+        }
+
         if (method === 'GET' && pathname === '/api/admin/backup') {
           const backupJson = JSON.stringify(store, null, 2);
           res.writeHead(200, {
@@ -5142,6 +6038,9 @@ module.exports = {
   verifyStripeSignature,
   safeEqualToken,
   buildIntegrationsStatus,
+  recordAnalyticsEvent,
+  aggregateFirstPartyAnalytics,
+  buildAnalyticsOverview,
   loadDotEnv,
   parseDotEnvFile,
   executeNeonSql,

@@ -1273,7 +1273,7 @@ async function runTests() {
         }
       }),
 
-      check('22. GET /api/admin/integrations auth, boolean-only reporting & 13-integration coverage', async () => {
+      check('22. GET /api/admin/integrations auth, boolean-only reporting & 14-integration coverage', async () => {
         const unauth = await jsonReq(baseUrl, '/api/admin/integrations');
         assert.strictEqual(unauth.status, 401);
 
@@ -1283,23 +1283,26 @@ async function runTests() {
         const clientDenied = await jsonReq(baseUrl, '/api/admin/integrations', { token: 'CLEAN-2026' });
         assert.strictEqual(clientDenied.status, 403);
 
-        // Partial env: ALLOWED_ORIGINS + META_VERIFY_TOKEN configured in isolatedEnv
+        // Partial env: ALLOWED_ORIGINS + META_VERIFY_TOKEN + built-in Rivvak First-Party Analytics
         const partialRes = await jsonReq(baseUrl, '/api/admin/integrations', { token: 'Jh22mp21??.' });
         assert.strictEqual(partialRes.status, 200);
         assert.strictEqual(partialRes.data.ok, true);
-        assert.deepStrictEqual(partialRes.data.summary, { connected: 1, missing: 12, total: 13 });
-        assert.strictEqual(partialRes.data.integrations.length, 13);
+        assert.deepStrictEqual(partialRes.data.summary, { connected: 2, missing: 12, total: 14 });
+        assert.strictEqual(partialRes.data.integrations.length, 14);
         assert.strictEqual(partialRes.raw.includes('rivvak-meta-verify-2026'), false, 'Never leak raw env values');
         assert.strictEqual(partialRes.raw.includes('Jh22mp21??.'), false, 'Never leak passcode');
 
+        const firstPartyItem = partialRes.data.integrations.find((i) => i.id === 'rivvak-first-party-analytics');
+        assert.ok(firstPartyItem && firstPartyItem.connected === true);
         const corsItem = partialRes.data.integrations.find((i) => i.name === 'Shopify Storefront CORS');
         assert.ok(corsItem && corsItem.connected === true);
         const metaItem = partialRes.data.integrations.find((i) => i.name === 'Meta / Facebook & Instagram');
         assert.ok(metaItem && metaItem.connected === false && metaItem.partial === true);
         assert.strictEqual(metaItem.env.META_VERIFY_TOKEN, true);
         assert.strictEqual(metaItem.env.META_ACCESS_TOKEN, false);
+        assert.ok(metaItem.setupUrl && metaItem.setupUrl.startsWith('https://'));
 
-        // Full env: verify 13/13 connected and zero raw secret strings leaked
+        // Full env: verify 14/14 connected and zero raw secret strings leaked
         const fullTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rivvak-int-full-'));
         let fullServer = null;
         try {
@@ -1347,7 +1350,7 @@ async function runTests() {
           const fullRes = await jsonReq(fullServer.url, '/api/admin/integrations', { token: 'Jh22mp21??.' });
           assert.strictEqual(fullRes.status, 200);
           assert.strictEqual(fullRes.data.ok, true);
-          assert.deepStrictEqual(fullRes.data.summary, { connected: 13, missing: 0, total: 13 });
+          assert.deepStrictEqual(fullRes.data.summary, { connected: 14, missing: 0, total: 14 });
           assert.strictEqual(fullRes.raw.includes(canarySecret), false, 'Response must contain booleans only, never values');
           for (const item of fullRes.data.integrations) {
             assert.strictEqual(item.connected, true);
@@ -1358,6 +1361,180 @@ async function runTests() {
         } finally {
           if (fullServer) await fullServer.stop().catch(() => {});
           fs.rmSync(fullTmpDir, { recursive: true, force: true });
+        }
+      }),
+
+      check('23. POST /api/public/track deduplication, attribution & conversion persistence', async () => {
+        // Two pageviews in same session -> 1 unique session, 2 pageviews
+        const pv1 = await jsonReq(baseUrl, '/api/public/track', {
+          method: 'POST',
+          body: {
+            type: 'pageview',
+            path: '/demo/pool',
+            client: 'blue-diamond-pools',
+            sessionId: 'sess-pool-1',
+            visitorId: 'vis-pool-1',
+            referrer: 'https://www.google.com/search?q=pool+service',
+            device: 'mobile',
+          },
+        });
+        assert.strictEqual(pv1.status, 200);
+        assert.strictEqual(pv1.data.client, 'blue-diamond-pools');
+
+        const pv2 = await jsonReq(baseUrl, '/api/public/track', {
+          method: 'POST',
+          body: {
+            type: 'pageview',
+            path: '/demo/pool#book',
+            sessionId: 'sess-pool-1',
+            visitorId: 'vis-pool-1',
+            device: 'mobile',
+          },
+        });
+        assert.strictEqual(pv2.status, 200);
+        assert.strictEqual(pv2.data.client, 'blue-diamond-pools');
+
+        // Duplicate engaged beacons from same session count once
+        await jsonReq(baseUrl, '/api/public/track', {
+          method: 'POST',
+          body: { type: 'engaged', path: '/demo/pool', client: 'blue-diamond-pools', sessionId: 'sess-pool-1' },
+        });
+        await jsonReq(baseUrl, '/api/public/track', {
+          method: 'POST',
+          body: { type: 'engaged', path: '/demo/pool', client: 'blue-diamond-pools', sessionId: 'sess-pool-1' },
+        });
+
+        // Conversion event + second Rivvak studio visitor (unengaged)
+        await jsonReq(baseUrl, '/api/public/track', {
+          method: 'POST',
+          body: { type: 'conversion', path: '/demo/pool', client: 'blue-diamond-pools', sessionId: 'sess-pool-1', label: 'estimate_submit' },
+        });
+        await jsonReq(baseUrl, '/api/public/track', {
+          method: 'POST',
+          body: { type: 'pageview', path: '/', client: 'rivvak', sessionId: 'sess-rivvak-2', visitorId: 'vis-rivvak-2', device: 'desktop' },
+        });
+
+        // Honeypot should be ignored silently
+        const hpRes = await jsonReq(baseUrl, '/api/public/track', {
+          method: 'POST',
+          body: { type: 'pageview', path: '/spam', _hp: 'bot-filled' },
+        });
+        assert.strictEqual(hpRes.status, 200);
+        assert.strictEqual(hpRes.data.ignored, true);
+
+        const poolOv = await jsonReq(baseUrl, '/api/admin/analytics-overview?range=7d&client=blue-diamond-pools', {
+          token: 'Jh22mp21??.',
+        });
+        assert.strictEqual(poolOv.status, 200);
+        assert.strictEqual(poolOv.data.firstParty.sessions, 1);
+        assert.strictEqual(poolOv.data.firstParty.totalUsers, 1);
+        assert.strictEqual(poolOv.data.firstParty.pageviews, 2);
+        assert.strictEqual(poolOv.data.firstParty.engagedSessions, 1);
+        assert.strictEqual(poolOv.data.firstParty.engagementRate, 100);
+        assert.strictEqual(poolOv.data.firstParty.conversions, 1);
+        assert.strictEqual(poolOv.data.firstParty.topPages[0].path, '/demo/pool');
+        assert.strictEqual(poolOv.data.firstParty.topSources[0].source, 'Organic Search');
+      }),
+
+      check('24. GET /api/admin/analytics-overview auth, JWT RS256 GA4 & Stripe live connector parsing', async () => {
+        const unauth = await jsonReq(baseUrl, '/api/admin/analytics-overview');
+        assert.strictEqual(unauth.status, 401);
+        const clientDenied = await jsonReq(baseUrl, '/api/admin/analytics-overview', { token: 'CLEAN-2026' });
+        assert.strictEqual(clientDenied.status, 403);
+
+        const allOv = await jsonReq(baseUrl, '/api/admin/analytics-overview?range=30d', { token: 'Jh22mp21??.' });
+        assert.strictEqual(allOv.status, 200);
+        assert.strictEqual(allOv.data.ok, true);
+        assert.strictEqual(allOv.data.firstParty.connected, true);
+        assert.ok(allOv.data.firstParty.sessions >= 2);
+        assert.ok(Array.isArray(allOv.data.firstParty.dailySeries) && allOv.data.firstParty.dailySeries.length === 30);
+        assert.strictEqual(allOv.data.ga4.connected, false);
+        assert.strictEqual(allOv.data.ga4.reason, 'missing_credentials');
+
+        // Verify live external connectors with ephemeral RSA keypair & mock fetchImpl
+        const { privateKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+        const privatePem = privateKey.export({ type: 'pkcs8', format: 'pem' });
+        const extTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rivvak-ext-analytics-'));
+        let extServer = null;
+        try {
+          extServer = await startServer({
+            port: 0,
+            host: '127.0.0.1',
+            dataDir: extTmpDir,
+            enableScheduler: false,
+            loadEnv: false,
+            env: {
+              ADMIN_PASSCODE: 'Jh22mp21??.',
+              GA4_PROPERTY_ID: '998877665',
+              GOOGLE_SERVICE_ACCOUNT_JSON: JSON.stringify({
+                client_email: 'rivvak-analytics@rivvak.iam.gserviceaccount.com',
+                private_key: privatePem,
+                token_uri: 'https://oauth2.googleapis.com/token',
+              }),
+              GSC_SITE_URL: 'https://rivvak.com/',
+              STRIPE_SECRET_KEY: 'sk_test_mock_123',
+            },
+            fetchImpl: async (targetUrl, init = {}) => {
+              const u = String(targetUrl);
+              if (u === 'https://oauth2.googleapis.com/token') {
+                assert.ok(String(init.body || '').includes('assertion='));
+                return { ok: true, status: 200, json: async () => ({ access_token: 'mock-google-token', expires_in: 3600 }) };
+              }
+              if (u.includes('analyticsdata.googleapis.com/v1beta/properties/998877665:runReport')) {
+                return {
+                  ok: true,
+                  status: 200,
+                  json: async () => ({
+                    rows: [
+                      {
+                        dimensionValues: [{ value: '20261121' }],
+                        metricValues: [
+                          { value: '42' },
+                          { value: '0.6' },
+                          { value: '70' },
+                          { value: '55' },
+                          { value: '4' },
+                          { value: '120' },
+                        ],
+                      },
+                    ],
+                  }),
+                };
+              }
+              if (u.includes('searchconsole.googleapis.com')) {
+                return {
+                  ok: true,
+                  status: 200,
+                  json: async () => ({
+                    rows: [{ keys: ['2026-11-21'], clicks: 18, impressions: 310, ctr: 0.058, position: 6.4 }],
+                  }),
+                };
+              }
+              if (u.includes('api.stripe.com/v1/subscriptions')) {
+                return {
+                  ok: true,
+                  status: 200,
+                  json: async () => ({
+                    data: [{ items: { data: [{ price: { unit_amount: 150000, recurring: { interval: 'month' } }, quantity: 1 }] } }],
+                  }),
+                };
+              }
+              return { ok: false, status: 404, json: async () => ({ error: { message: 'Unexpected URL' } }) };
+            },
+          });
+
+          const extOv = await jsonReq(extServer.url, '/api/admin/analytics-overview?range=7d', { token: 'Jh22mp21??.' });
+          assert.strictEqual(extOv.status, 200);
+          assert.strictEqual(extOv.data.ga4.connected, true);
+          assert.strictEqual(extOv.data.ga4.engagedSessions, 42);
+          assert.strictEqual(extOv.data.ga4.sessions, 70);
+          assert.strictEqual(extOv.data.gsc.connected, true);
+          assert.strictEqual(extOv.data.gsc.clicks, 18);
+          assert.strictEqual(extOv.data.stripe.connected, true);
+          assert.strictEqual(extOv.data.stripe.mrr, 1500);
+        } finally {
+          if (extServer) await extServer.stop().catch(() => {});
+          fs.rmSync(extTmpDir, { recursive: true, force: true });
         }
       }),
     ];
