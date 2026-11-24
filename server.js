@@ -1621,6 +1621,18 @@ const INTEGRATION_CATALOG = [
     unlocks: 'Rivvak agency retainer checkout via Shopify (clients enter their own Stripe keys inside /pages/client-portal)',
   },
   {
+    id: 'shopify-admin-finances',
+    name: 'Shopify Admin & Finances API',
+    category: 'Billing, SMS & Automation',
+    keys: ['SHOPIFY_SHOP_DOMAIN', 'SHOPIFY_CLIENT_ID', 'SHOPIFY_CLIENT_SECRET'],
+    fallbacks: {
+      SHOPIFY_CLIENT_ID: 'SHOPIFY_ADMIN_ACCESS_TOKEN',
+      SHOPIFY_CLIENT_SECRET: 'SHOPIFY_ADMIN_ACCESS_TOKEN',
+    },
+    setupUrl: 'https://dev.shopify.com/dashboard/156058651/apps/340290797569/settings',
+    unlocks: 'Live Shopify Orders, Draft Orders, Refunds, Net Collected Revenue & Partner P&L Profit Sync',
+  },
+  {
     id: 'twilio-sms',
     name: 'Twilio SMS',
     category: 'Billing, SMS & Automation',
@@ -1731,6 +1743,438 @@ function buildIntegrationsStatus(env = process.env) {
     integrations,
     timestamp: new Date().toISOString(),
   };
+}
+
+const SHOPIFY_FINANCES_CACHE_TTL_MS = 60 * 1000;
+
+function round2(n) {
+  return Math.round((Number(n || 0) + Number.EPSILON) * 100) / 100;
+}
+
+function resolveShopifyConfig(env = process.env) {
+  const raw = String(env.SHOPIFY_SHOP_DOMAIN || env.SHOPIFY_STORE || 'fdguvq-yv.myshopify.com')
+    .trim()
+    .replace(/^https?:\/\//i, '')
+    .replace(/\/.*$/, '');
+  const shopDomain = raw ? (raw.includes('.') ? raw : `${raw}.myshopify.com`) : 'fdguvq-yv.myshopify.com';
+  const shopHandle = shopDomain.replace(/\.myshopify\.com$/i, '') || 'fdguvq-yv';
+  return {
+    shopDomain,
+    shopHandle,
+    clientId: String(env.SHOPIFY_CLIENT_ID || '').trim(),
+    clientSecret: String(env.SHOPIFY_CLIENT_SECRET || '').trim(),
+    staticToken: String(env.SHOPIFY_ADMIN_ACCESS_TOKEN || '').trim(),
+    apiVersion: String(env.SHOPIFY_API_VERSION || '2026-01').trim() || '2026-01',
+  };
+}
+
+function formatShopifyDateParts(isoStr, timeZone = 'America/New_York') {
+  const parsed = Date.parse(String(isoStr || ''));
+  const dt = Number.isFinite(parsed) ? new Date(parsed) : new Date();
+  const fmt = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  });
+  const parts = {};
+  for (const p of fmt.formatToParts(dt)) {
+    if (p.type === 'year' || p.type === 'month' || p.type === 'day') {
+      parts[p.type] = p.value;
+    }
+  }
+  const month = `${parts.year}-${parts.month}`;
+  return { month, date: `${month}-${parts.day}` };
+}
+
+function parseShopifyNextLink(linkHeader) {
+  if (!linkHeader || typeof linkHeader !== 'string') return '';
+  for (const seg of linkHeader.split(',')) {
+    const m = seg.match(/<([^>]+)>;\s*rel="?next"?/i);
+    if (m && m[1]) return m[1];
+  }
+  return '';
+}
+
+function createZeroShopifySummary() {
+  return {
+    allTimeGross: 0,
+    allTimeRefunded: 0,
+    allTimeNet: 0,
+    totalUnpaidShopify: 0,
+    pendingOrdersTotal: 0,
+    openDraftsTotal: 0,
+    openDraftsCount: 0,
+    orderCount: 0,
+    paidOrderCount: 0,
+    refundedOrVoidedCount: 0,
+    testOrdersCount: 0,
+    draftOrderCount: 0,
+  };
+}
+
+/**
+ * Pure aggregator converting Shopify Orders + Draft Orders into monthly & all-time P&L figures
+ * without double-counting completed draft orders against their generated orders.
+ */
+function aggregateShopifyFinances(orders = [], draftOrders = [], opts = {}) {
+  const shopHandle = opts.shopHandle || 'fdguvq-yv';
+  const timeZone = opts.timeZone || 'America/New_York';
+  const byMonth = {};
+  const ensureMonth = (m) => {
+    if (!byMonth[m]) {
+      byMonth[m] = {
+        month: m,
+        gross: 0,
+        refunded: 0,
+        netRevenue: 0,
+        pendingOrdersTotal: 0,
+        openDraftsTotal: 0,
+        openDraftsCount: 0,
+        orderCount: 0,
+        paidOrderCount: 0,
+        orders: [],
+      };
+    }
+    return byMonth[m];
+  };
+
+  const allOrderIds = new Set();
+  const normalizedOrders = [];
+  const summary = createZeroShopifySummary();
+
+  for (const o of Array.isArray(orders) ? orders : []) {
+    if (!o || typeof o !== 'object') continue;
+    const idStr = o.id != null ? String(o.id) : '';
+    if (idStr) allOrderIds.add(idStr);
+
+    if (o.test === true) {
+      summary.testOrdersCount++;
+      continue;
+    }
+
+    summary.orderCount++;
+    const createdIso = o.created_at || o.processed_at || o.updated_at || new Date().toISOString();
+    const { month, date } = formatShopifyDateParts(createdIso, timeZone);
+    const fs = String(o.financial_status || '').toLowerCase().trim();
+    const cancelled = Boolean(o.cancelled_at) || fs === 'voided';
+    const gross = round2(Number(o.total_price || 0));
+    const outstanding = round2(Math.max(0, Number(o.total_outstanding || 0)));
+
+    let refundTxSum = 0;
+    let hasRefundTx = false;
+    for (const rf of Array.isArray(o.refunds) ? o.refunds : []) {
+      for (const tx of Array.isArray(rf?.transactions) ? rf.transactions : []) {
+        if (String(tx?.kind || '').toLowerCase() === 'refund' && (!tx.status || tx.status === 'success')) {
+          refundTxSum = round2(refundTxSum + Number(tx.amount || 0));
+          hasRefundTx = true;
+        }
+      }
+    }
+    const refunded = hasRefundTx
+      ? refundTxSum
+      : o.current_total_price != null
+        ? round2(Math.max(0, gross - Number(o.current_total_price)))
+        : fs === 'refunded'
+          ? gross
+          : 0;
+
+    let netCollected = 0;
+    let pendingAmt = 0;
+    let effectiveGross = 0;
+    if (cancelled || fs === 'refunded') {
+      netCollected = 0;
+      summary.refundedOrVoidedCount++;
+      summary.allTimeRefunded = round2(summary.allTimeRefunded + refunded);
+    } else if (fs === 'paid' || fs === 'partially_refunded') {
+      const netFromCurrent = o.current_total_price != null ? Number(o.current_total_price) : gross - refunded;
+      netCollected = round2(Math.max(0, netFromCurrent));
+      effectiveGross = gross;
+      summary.allTimeGross = round2(summary.allTimeGross + gross);
+      summary.allTimeRefunded = round2(summary.allTimeRefunded + refunded);
+      summary.allTimeNet = round2(summary.allTimeNet + netCollected);
+      summary.paidOrderCount++;
+    } else if (fs === 'partially_paid') {
+      netCollected = round2(Math.max(0, gross - refunded - outstanding));
+      pendingAmt = outstanding;
+      effectiveGross = netCollected;
+      summary.allTimeGross = round2(summary.allTimeGross + netCollected);
+      summary.allTimeRefunded = round2(summary.allTimeRefunded + refunded);
+      summary.allTimeNet = round2(summary.allTimeNet + netCollected);
+      summary.pendingOrdersTotal = round2(summary.pendingOrdersTotal + pendingAmt);
+      if (netCollected > 0) summary.paidOrderCount++;
+    } else {
+      netCollected = 0;
+      pendingAmt = outstanding > 0 ? outstanding : o.current_total_price != null ? round2(Number(o.current_total_price)) : gross;
+      summary.pendingOrdersTotal = round2(summary.pendingOrdersTotal + pendingAmt);
+    }
+
+    const customerName =
+      [o.customer?.first_name, o.customer?.last_name].filter(Boolean).join(' ').trim() ||
+      o.customer?.email ||
+      o.email ||
+      o.billing_address?.name ||
+      'Walk-In / Direct';
+    const lineSummary =
+      (Array.isArray(o.line_items) ? o.line_items : [])
+        .map((li) => `${Number(li?.quantity || 1) > 1 ? `${li.quantity}x ` : ''}${li?.title || li?.name || 'Item'}`)
+        .filter(Boolean)
+        .join(', ') || 'Shopify Order';
+
+    const orderItem = {
+      id: idStr,
+      name: o.name || `#${o.order_number || idStr}`,
+      createdAt: createdIso,
+      date,
+      month,
+      customerName,
+      lineSummary,
+      financialStatus: cancelled ? 'voided' : fs || 'unknown',
+      sourceName: o.source_name || 'web',
+      gross,
+      refunded,
+      outstanding: pendingAmt,
+      netCollected,
+      currency: o.currency || 'USD',
+      adminUrl: `https://admin.shopify.com/store/${shopHandle}/orders/${idStr}`,
+      kind: 'order',
+    };
+
+    const bucket = ensureMonth(month);
+    bucket.orderCount++;
+    if (netCollected > 0) bucket.paidOrderCount++;
+    bucket.gross = round2(bucket.gross + effectiveGross);
+    bucket.refunded = round2(bucket.refunded + refunded);
+    bucket.netRevenue = round2(bucket.netRevenue + netCollected);
+    bucket.pendingOrdersTotal = round2(bucket.pendingOrdersTotal + pendingAmt);
+    bucket.orders.push(orderItem);
+    normalizedOrders.push(orderItem);
+  }
+
+  const normalizedDrafts = [];
+  for (const d of Array.isArray(draftOrders) ? draftOrders : []) {
+    if (!d || typeof d !== 'object') continue;
+    const dId = d.id != null ? String(d.id) : '';
+    const linkedOrderId = d.order_id != null ? String(d.order_id) : null;
+    const status = String(d.status || '').toLowerCase().trim();
+    const createdIso = d.created_at || d.updated_at || new Date().toISOString();
+    const { month, date } = formatShopifyDateParts(createdIso, timeZone);
+    const totalPrice = round2(Number(d.total_price || 0));
+    const customerName =
+      [d.customer?.first_name, d.customer?.last_name].filter(Boolean).join(' ').trim() ||
+      d.customer?.email ||
+      d.email ||
+      d.billing_address?.name ||
+      'No customer';
+    const lineSummary =
+      (Array.isArray(d.line_items) ? d.line_items : [])
+        .map((li) => `${Number(li?.quantity || 1) > 1 ? `${li.quantity}x ` : ''}${li?.title || li?.name || 'Item'}`)
+        .filter(Boolean)
+        .join(', ') || 'Draft Order';
+    const dedupedWithOrder = status === 'completed' && Boolean(linkedOrderId && allOrderIds.has(linkedOrderId));
+    const adminUrl = `https://admin.shopify.com/store/${shopHandle}/draft_orders/${dId}`;
+
+    if (status === 'open' || status === 'invoice_sent') {
+      summary.openDraftsCount++;
+      summary.openDraftsTotal = round2(summary.openDraftsTotal + totalPrice);
+      const bucket = ensureMonth(month);
+      bucket.openDraftsCount++;
+      bucket.openDraftsTotal = round2(bucket.openDraftsTotal + totalPrice);
+    } else if (status === 'completed' && !dedupedWithOrder && totalPrice > 0) {
+      summary.allTimeGross = round2(summary.allTimeGross + totalPrice);
+      summary.allTimeNet = round2(summary.allTimeNet + totalPrice);
+      summary.paidOrderCount++;
+      const fallbackOrder = {
+        id: dId,
+        name: d.name || `#D${dId}`,
+        createdAt: createdIso,
+        date,
+        month,
+        customerName,
+        lineSummary,
+        financialStatus: 'paid',
+        sourceName: 'completed_draft_only',
+        gross: totalPrice,
+        refunded: 0,
+        outstanding: 0,
+        netCollected: totalPrice,
+        currency: d.currency || 'USD',
+        adminUrl,
+        kind: 'completed_draft_only',
+      };
+      const bucket = ensureMonth(month);
+      bucket.orderCount++;
+      bucket.paidOrderCount++;
+      bucket.gross = round2(bucket.gross + totalPrice);
+      bucket.netRevenue = round2(bucket.netRevenue + totalPrice);
+      bucket.orders.push(fallbackOrder);
+      normalizedOrders.push(fallbackOrder);
+    }
+
+    normalizedDrafts.push({
+      id: dId,
+      name: d.name || `#D${dId}`,
+      orderId: linkedOrderId,
+      dedupedWithOrder,
+      status,
+      createdAt: createdIso,
+      date,
+      month,
+      customerName,
+      lineSummary,
+      totalPrice,
+      currency: d.currency || 'USD',
+      adminUrl,
+    });
+  }
+
+  summary.draftOrderCount = normalizedDrafts.length;
+  summary.totalUnpaidShopify = round2(summary.pendingOrdersTotal + summary.openDraftsTotal);
+
+  const byDateDesc = (a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || ''));
+  normalizedOrders.sort(byDateDesc);
+  normalizedDrafts.sort(byDateDesc);
+  for (const m of Object.keys(byMonth)) {
+    byMonth[m].orders.sort(byDateDesc);
+  }
+
+  return { summary, byMonth, orders: normalizedOrders, draftOrders: normalizedDrafts };
+}
+
+async function getShopifyAdminAccessToken({ env = process.env, fetchImpl = globalThis.fetch, cache = new Map(), forceRefresh = false }) {
+  const cfg = resolveShopifyConfig(env);
+  if (cfg.staticToken) {
+    return { ok: true, token: cfg.staticToken, source: 'static_token', ...cfg };
+  }
+  const missingKeys = [];
+  if (!cfg.clientId) missingKeys.push('SHOPIFY_CLIENT_ID');
+  if (!cfg.clientSecret) missingKeys.push('SHOPIFY_CLIENT_SECRET');
+  if (missingKeys.length > 0) {
+    return { ok: false, missingKeys, partial: Boolean(cfg.clientId), ...cfg };
+  }
+
+  const cacheKey = `shopify:oauth:${cfg.shopDomain}:${cfg.clientId}`;
+  if (!forceRefresh) {
+    const hit = cache.get(cacheKey);
+    if (hit && hit.expiresAt > Date.now() + 30 * 60 * 1000) {
+      return { ok: true, token: hit.token, source: 'oauth_cached', ...cfg };
+    }
+  }
+
+  const body = new URLSearchParams({
+    grant_type: 'client_credentials',
+    client_id: cfg.clientId,
+    client_secret: cfg.clientSecret,
+  }).toString();
+
+  const res = await fetchImpl(`https://${cfg.shopDomain}/admin/oauth/access_token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
+    body,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data?.access_token) {
+    const msg = data?.error_description || data?.error || `Shopify OAuth token exchange failed (HTTP ${res.status})`;
+    const err = new Error(msg);
+    err.status = res.status;
+    throw err;
+  }
+
+  const expiresSec = Math.max(120, Number(data.expires_in || 86340));
+  cache.set(cacheKey, {
+    token: data.access_token,
+    expiresAt: Date.now() + expiresSec * 1000,
+  });
+  return { ok: true, token: data.access_token, source: 'oauth_fresh', ...cfg };
+}
+
+async function fetchAllShopifyResource(shopDomain, token, apiVersion, initialPath, rootKey, fetchImpl = globalThis.fetch) {
+  const items = [];
+  let nextUrl = `https://${shopDomain}/admin/api/${apiVersion}${initialPath}`;
+  for (let page = 0; page < 10 && nextUrl; page++) {
+    const res = await fetchImpl(nextUrl, {
+      method: 'GET',
+      headers: { 'X-Shopify-Access-Token': token, Accept: 'application/json' },
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const err = new Error(data?.errors ? JSON.stringify(data.errors) : `Shopify API HTTP ${res.status}`);
+      err.status = res.status;
+      throw err;
+    }
+    if (Array.isArray(data?.[rootKey])) {
+      items.push(...data[rootKey]);
+    }
+    const linkHeader = typeof res.headers?.get === 'function' ? res.headers.get('link') : res.headers?.link;
+    nextUrl = parseShopifyNextLink(linkHeader);
+  }
+  return items;
+}
+
+async function fetchLiveShopifyFinances({ env = process.env, refresh = false, fetchImpl = globalThis.fetch, cache = new Map() }) {
+  const auth = await getShopifyAdminAccessToken({ env, fetchImpl, cache, forceRefresh: false });
+  if (!auth.ok) {
+    return {
+      ok: true,
+      connected: false,
+      partial: auth.partial,
+      missingKeys: auth.missingKeys,
+      shopDomain: auth.shopDomain,
+      shopHandle: auth.shopHandle,
+      setupUrl: 'https://dev.shopify.com/dashboard/156058651/apps/340290797569/settings',
+      summary: createZeroShopifySummary(),
+      byMonth: {},
+      orders: [],
+      draftOrders: [],
+      timestamp: new Date().toISOString(),
+    };
+  }
+
+  const finCacheKey = `shopify:finances:${auth.shopDomain}`;
+  if (!refresh) {
+    const cached = cache.get(finCacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      return { ...cached.value, cached: true };
+    }
+  }
+
+  const runFetch = async (tok) => {
+    const [orders, draftOrders] = await Promise.all([
+      fetchAllShopifyResource(auth.shopDomain, tok, auth.apiVersion, '/orders.json?status=any&limit=250', 'orders', fetchImpl),
+      fetchAllShopifyResource(auth.shopDomain, tok, auth.apiVersion, '/draft_orders.json?limit=250', 'draft_orders', fetchImpl),
+    ]);
+    return { orders, draftOrders };
+  };
+
+  let rawData;
+  try {
+    rawData = await runFetch(auth.token);
+  } catch (err) {
+    if (err?.status === 401 && auth.source !== 'static_token') {
+      const refreshed = await getShopifyAdminAccessToken({ env, fetchImpl, cache, forceRefresh: true });
+      rawData = await runFetch(refreshed.token);
+    } else {
+      throw err;
+    }
+  }
+
+  const agg = aggregateShopifyFinances(rawData.orders, rawData.draftOrders, {
+    shopHandle: auth.shopHandle,
+    timeZone: 'America/New_York',
+  });
+  const nowIso = new Date().toISOString();
+  const payload = {
+    ok: true,
+    connected: true,
+    cached: false,
+    shopDomain: auth.shopDomain,
+    shopHandle: auth.shopHandle,
+    syncedAt: nowIso,
+    timestamp: nowIso,
+    ...agg,
+  };
+  cache.set(finCacheKey, { value: payload, expiresAt: Date.now() + SHOPIFY_FINANCES_CACHE_TTL_MS });
+  return payload;
 }
 
 function maskSecretTail(val) {
@@ -5756,6 +6200,34 @@ function createServer(options = {}) {
           return;
         }
 
+        if (method === 'GET' && pathname === '/api/admin/shopify-finances') {
+          const refresh = queryParams.refresh === '1' || queryParams.refresh === 'true';
+          try {
+            const report = await fetchLiveShopifyFinances({
+              env,
+              refresh,
+              fetchImpl,
+              cache: analyticsCache,
+            });
+            sendJson(res, 200, report);
+          } catch (err) {
+            const cfg = resolveShopifyConfig(env);
+            sendJson(res, 502, {
+              ok: false,
+              connected: false,
+              shopDomain: cfg.shopDomain,
+              shopHandle: cfg.shopHandle,
+              error: err.message || 'Shopify finances sync failed',
+              summary: createZeroShopifySummary(),
+              byMonth: {},
+              orders: [],
+              draftOrders: [],
+              timestamp: new Date().toISOString(),
+            });
+          }
+          return;
+        }
+
         if (method === 'GET' && pathname === '/api/admin/analytics-overview') {
           const range = ['7d', '30d', '90d'].includes(queryParams.range) ? queryParams.range : '30d';
           const clientFilter = String(queryParams.client || 'all').trim() || 'all';
@@ -6197,6 +6669,8 @@ module.exports = {
   verifyStripeSignature,
   safeEqualToken,
   buildIntegrationsStatus,
+  aggregateShopifyFinances,
+  fetchLiveShopifyFinances,
   recordAnalyticsEvent,
   aggregateFirstPartyAnalytics,
   buildAnalyticsOverview,

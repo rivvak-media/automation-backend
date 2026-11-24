@@ -25,6 +25,8 @@ const {
   saveStore,
   safeEqualToken,
   parseDotEnvFile,
+  buildIntegrationsStatus,
+  aggregateShopifyFinances,
 } = require('./server');
 
 /**
@@ -1273,7 +1275,7 @@ async function runTests() {
         }
       }),
 
-      check('22. GET /api/admin/integrations auth, boolean-only reporting & 14-integration coverage', async () => {
+      check('22. GET /api/admin/integrations auth, boolean-only reporting & 15-integration coverage', async () => {
         const unauth = await jsonReq(baseUrl, '/api/admin/integrations');
         assert.strictEqual(unauth.status, 401);
 
@@ -1287,8 +1289,8 @@ async function runTests() {
         const partialRes = await jsonReq(baseUrl, '/api/admin/integrations', { token: 'Jh22mp21??.' });
         assert.strictEqual(partialRes.status, 200);
         assert.strictEqual(partialRes.data.ok, true);
-        assert.deepStrictEqual(partialRes.data.summary, { connected: 3, missing: 11, total: 14 });
-        assert.strictEqual(partialRes.data.integrations.length, 14);
+        assert.deepStrictEqual(partialRes.data.summary, { connected: 3, missing: 12, total: 15 });
+        assert.strictEqual(partialRes.data.integrations.length, 15);
         assert.strictEqual(partialRes.raw.includes('rivvak-meta-verify-2026'), false, 'Never leak raw env values');
         assert.strictEqual(partialRes.raw.includes('Jh22mp21??.'), false, 'Never leak passcode');
 
@@ -1346,13 +1348,16 @@ async function runTests() {
               RESEND_API_KEY: canarySecret,
               RESEND_FROM: 'Rivvak Media <connect@rivvak.com>',
               WEBHOOK_URL: `https://hook.example/${canarySecret}`,
+              SHOPIFY_SHOP_DOMAIN: 'fdguvq-yv.myshopify.com',
+              SHOPIFY_CLIENT_ID: 'cid_full',
+              SHOPIFY_CLIENT_SECRET: canarySecret,
             },
           });
 
           const fullRes = await jsonReq(fullServer.url, '/api/admin/integrations', { token: 'Jh22mp21??.' });
           assert.strictEqual(fullRes.status, 200);
           assert.strictEqual(fullRes.data.ok, true);
-          assert.deepStrictEqual(fullRes.data.summary, { connected: 14, missing: 0, total: 14 });
+          assert.deepStrictEqual(fullRes.data.summary, { connected: 15, missing: 0, total: 15 });
           assert.strictEqual(fullRes.raw.includes(canarySecret), false, 'Response must contain booleans only, never values');
           for (const item of fullRes.data.integrations) {
             assert.strictEqual(item.connected, true);
@@ -1625,6 +1630,242 @@ async function runTests() {
         assert.strictEqual(goodHook.status, 200);
         const goodJson = await goodHook.json();
         assert.strictEqual(goodJson.clientSlug, 'clean-results');
+      }),
+
+      check('26. Shopify finances aggregator (dedup, refunds/voids, EST month bucketing) & /api/admin/shopify-finances endpoint', async () => {
+        // Unconfigured integration check
+        const partialInt = buildIntegrationsStatus({
+          SHOPIFY_SHOP_DOMAIN: 'fdguvq-yv.myshopify.com',
+          SHOPIFY_CLIENT_ID: 'e3223a03bb1380e4af13f22be6eebac8',
+        });
+        const sfEntry = partialInt.integrations.find((i) => i.id === 'shopify-admin-finances');
+        assert.ok(sfEntry, 'shopify-admin-finances present in catalog');
+        assert.strictEqual(sfEntry.connected, false);
+        assert.strictEqual(sfEntry.partial, true);
+        assert.deepStrictEqual(sfEntry.missingKeys, ['SHOPIFY_CLIENT_SECRET']);
+
+        // Pure aggregator accuracy test
+        const agg = aggregateShopifyFinances(
+          [
+            {
+              id: 1001,
+              name: '#1032',
+              created_at: '2026-11-12T17:50:00Z',
+              financial_status: 'paid',
+              total_price: '900.00',
+              current_total_price: '900.00',
+              customer: { first_name: 'Aiden', last_name: 'Strompf' },
+              line_items: [{ title: 'Website Package', quantity: 1 }],
+            },
+            {
+              id: 1002,
+              name: '#1038',
+              // 2026-11-22 22:48 EST = 2026-11-23 03:48 UTC; EST check -> still 2026-11 (2026-11-01 02:00 UTC -> 2026-10!)
+              created_at: '2026-11-23T03:48:00Z',
+              financial_status: 'paid',
+              total_price: '400.00',
+              current_total_price: '400.00',
+              source_name: 'shopify_draft_order',
+              line_items: [{ title: 'Website Carleen Ligozio', quantity: 1 }],
+            },
+            {
+              id: 1003,
+              name: '#1029',
+              created_at: '2026-10-31T16:16:00Z',
+              financial_status: 'refunded',
+              total_price: '250.00',
+              current_total_price: '0.00',
+              refunds: [{ transactions: [{ kind: 'refund', status: 'success', amount: '250.00' }] }],
+              line_items: [{ title: 'Refunded Test', quantity: 1 }],
+            },
+            {
+              id: 1004,
+              name: '#1027',
+              created_at: '2026-10-05T18:31:00Z',
+              financial_status: 'voided',
+              cancelled_at: '2026-10-05T19:00:00Z',
+              total_price: '99.00',
+              line_items: [{ title: 'Voided Sub', quantity: 1 }],
+            },
+            {
+              id: 1005,
+              name: '#1099',
+              created_at: '2026-11-20T15:00:00Z',
+              financial_status: 'paid',
+              test: true,
+              total_price: '7777.00',
+              line_items: [{ title: 'Shopify Bogus Test', quantity: 1 }],
+            },
+            {
+              id: 1006,
+              name: '#1039',
+              created_at: '2026-12-01T02:00:00Z', // 2026-11-30 9:00 PM EST -> belongs to 2026-11!
+              financial_status: 'partially_paid',
+              total_price: '500.00',
+              total_outstanding: '200.00',
+              line_items: [{ title: 'Retainer Deposit', quantity: 1 }],
+            },
+          ],
+          [
+            {
+              id: 1632323797312,
+              name: '#D37',
+              status: 'completed',
+              order_id: 1002,
+              total_price: '400.00',
+              created_at: '2026-11-23T03:48:00Z',
+              line_items: [{ title: 'Website Carleen Ligozio', quantity: 1 }],
+            },
+            {
+              id: 999001,
+              name: '#D38',
+              status: 'open',
+              order_id: null,
+              total_price: '650.00',
+              created_at: '2026-11-23T18:00:00Z',
+              customer: { first_name: 'Prospect', last_name: 'Draft' },
+              line_items: [{ title: 'Pool Build Invoice', quantity: 1 }],
+            },
+          ],
+          { shopHandle: 'fdguvq-yv', timeZone: 'America/New_York' }
+        );
+
+        // #1032 (900) + #1038 (400, NOT doubled by #D37) + #1039 paid part (300) = 1600
+        assert.strictEqual(agg.summary.allTimeNet, 1600);
+        assert.strictEqual(agg.summary.allTimeRefunded, 250);
+        assert.strictEqual(agg.summary.openDraftsTotal, 650);
+        assert.strictEqual(agg.summary.openDraftsCount, 1);
+        assert.strictEqual(agg.summary.pendingOrdersTotal, 200);
+        assert.strictEqual(agg.summary.totalUnpaidShopify, 850);
+        assert.strictEqual(agg.summary.testOrdersCount, 1);
+        assert.strictEqual(agg.byMonth['2026-11'].netRevenue, 1600);
+        assert.strictEqual(agg.byMonth['2026-10'].netRevenue, 0);
+        assert.strictEqual(agg.byMonth['2026-10'].refunded, 250);
+        assert.strictEqual(agg.draftOrders.find((d) => d.name === '#D37').dedupedWithOrder, true);
+
+        // Auth + Graceful Unconfigured 200 check on baseUrl (no Shopify keys configured in base test server)
+        const unauth = await jsonReq(baseUrl, '/api/admin/shopify-finances');
+        assert.strictEqual(unauth.status, 401);
+        const uncfg = await jsonReq(baseUrl, '/api/admin/shopify-finances', { token: 'Jh22mp21??.' });
+        assert.strictEqual(uncfg.status, 200);
+        assert.strictEqual(uncfg.data.connected, false);
+
+        // Live mocked OAuth client_credentials + pagination + 401 refresh test
+        const shTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rivvak-shopify-test-'));
+        let shServer;
+        let oauthCalls = 0;
+        let orderCalls = 0;
+        try {
+          shServer = await startServer({
+            port: 0,
+            host: '127.0.0.1',
+            storePath: path.join(shTmpDir, 'store.json'),
+            envPath: path.join(shTmpDir, '.env.missing'),
+            env: {
+              ADMIN_PASSCODE: 'Jh22mp21??.',
+              SHOPIFY_SHOP_DOMAIN: 'fdguvq-yv.myshopify.com',
+              SHOPIFY_CLIENT_ID: 'cid_test_123',
+              SHOPIFY_CLIENT_SECRET: 'csec_test_456',
+            },
+            fetchImpl: async (targetUrl, init = {}) => {
+              const u = String(targetUrl);
+              if (u.includes('/admin/oauth/access_token')) {
+                oauthCalls++;
+                return {
+                  ok: true,
+                  status: 200,
+                  json: async () => ({ access_token: `shpat_mock_${oauthCalls}`, expires_in: 86400 }),
+                };
+              }
+              if (u.includes('/orders.json')) {
+                orderCalls++;
+                // First order call returns 401 to verify automatic OAuth token refresh retry
+                if (orderCalls === 1) {
+                  return { ok: false, status: 401, json: async () => ({ errors: 'Expired token' }) };
+                }
+                if (u.includes('page_info=p2')) {
+                  return {
+                    ok: true,
+                    status: 200,
+                    headers: { get: () => '' },
+                    json: async () => ({
+                      orders: [
+                        {
+                          id: 2002,
+                          name: '#1037',
+                          created_at: '2026-11-14T22:09:00-05:00',
+                          financial_status: 'paid',
+                          total_price: '11.21',
+                          current_total_price: '11.21',
+                          line_items: [{ title: 'Sample 2', quantity: 1 }],
+                        },
+                      ],
+                    }),
+                  };
+                }
+                return {
+                  ok: true,
+                  status: 200,
+                  headers: {
+                    get: (k) =>
+                      String(k).toLowerCase() === 'link'
+                        ? '<https://fdguvq-yv.myshopify.com/admin/api/2026-01/orders.json?page_info=p2>; rel="next"'
+                        : '',
+                  },
+                  json: async () => ({
+                    orders: [
+                      {
+                        id: 2001,
+                        name: '#1032',
+                        created_at: '2026-11-12T12:50:00-05:00',
+                        financial_status: 'paid',
+                        total_price: '900.00',
+                        current_total_price: '900.00',
+                        line_items: [{ title: 'Retainer', quantity: 1 }],
+                      },
+                    ],
+                  }),
+                };
+              }
+              if (u.includes('/draft_orders.json')) {
+                return {
+                  ok: true,
+                  status: 200,
+                  headers: { get: () => '' },
+                  json: async () => ({
+                    draft_orders: [
+                      {
+                        id: 1632323797312,
+                        name: '#D37',
+                        status: 'open',
+                        total_price: '400.00',
+                        created_at: '2026-11-22T22:48:00-05:00',
+                        line_items: [{ title: 'Website Carleen Ligozio', quantity: 1 }],
+                      },
+                    ],
+                  }),
+                };
+              }
+              return { ok: false, status: 404, json: async () => ({ error: 'Unexpected URL' }) };
+            },
+          });
+
+          const finRes = await jsonReq(shServer.url, '/api/admin/shopify-finances?refresh=1', { token: 'Jh22mp21??.' });
+          assert.strictEqual(finRes.status, 200);
+          assert.strictEqual(finRes.data.connected, true);
+          assert.strictEqual(oauthCalls, 2, 'Should refresh OAuth token once after 401');
+          assert.strictEqual(finRes.data.summary.allTimeNet, 911.21);
+          assert.strictEqual(finRes.data.summary.openDraftsTotal, 400);
+          assert.strictEqual(finRes.data.orders.length, 2);
+
+          const intLive = await jsonReq(shServer.url, '/api/admin/integrations', { token: 'Jh22mp21??.' });
+          assert.strictEqual(intLive.status, 200);
+          const sfLive = intLive.data.integrations.find((i) => i.id === 'shopify-admin-finances');
+          assert.strictEqual(sfLive.connected, true);
+        } finally {
+          if (shServer) await shServer.stop().catch(() => {});
+          fs.rmSync(shTmpDir, { recursive: true, force: true });
+        }
       }),
     ];
 
