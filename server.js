@@ -1758,6 +1758,16 @@ function resolveShopifyConfig(env = process.env) {
     .replace(/\/.*$/, '');
   const shopDomain = raw ? (raw.includes('.') ? raw : `${raw}.myshopify.com`) : 'fdguvq-yv.myshopify.com';
   const shopHandle = shopDomain.replace(/\.myshopify\.com$/i, '') || 'fdguvq-yv';
+  const rawMinOrder = env.SHOPIFY_FINANCES_MIN_ORDER_NUMBER;
+  const minOrderNumber =
+    rawMinOrder !== undefined ? Math.max(0, Number(String(rawMinOrder).trim()) || 0) : 1038;
+  const rawMinDate = env.SHOPIFY_FINANCES_MIN_CREATED_AT;
+  const minCreatedAt =
+    rawMinDate !== undefined
+      ? String(rawMinDate).trim().toLowerCase() === 'none'
+        ? ''
+        : String(rawMinDate).trim()
+      : '2026-11-22T22:48:33-05:00';
   return {
     shopDomain,
     shopHandle,
@@ -1765,7 +1775,20 @@ function resolveShopifyConfig(env = process.env) {
     clientSecret: String(env.SHOPIFY_CLIENT_SECRET || '').trim(),
     staticToken: String(env.SHOPIFY_ADMIN_ACCESS_TOKEN || '').trim(),
     apiVersion: String(env.SHOPIFY_API_VERSION || '2026-01').trim() || '2026-01',
+    minOrderNumber,
+    minCreatedAt,
   };
+}
+
+function extractShopifyOrderNumber(o) {
+  const direct = Number(o?.order_number);
+  if (Number.isFinite(direct) && direct > 0) return direct;
+  const m = String(o?.name || '').match(/(\d+)/);
+  if (m) {
+    const n = Number(m[1]);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return 0;
 }
 
 function formatShopifyDateParts(isoStr, timeZone = 'America/New_York') {
@@ -1809,6 +1832,7 @@ function createZeroShopifySummary() {
     paidOrderCount: 0,
     refundedOrVoidedCount: 0,
     testOrdersCount: 0,
+    excludedLegacyOrdersCount: 0,
     draftOrderCount: 0,
   };
 }
@@ -1820,6 +1844,9 @@ function createZeroShopifySummary() {
 function aggregateShopifyFinances(orders = [], draftOrders = [], opts = {}) {
   const shopHandle = opts.shopHandle || 'fdguvq-yv';
   const timeZone = opts.timeZone || 'America/New_York';
+  const minOrderNum = Math.max(0, Number(opts.minOrderNumber || 0) || 0);
+  const minCreatedAt = opts.minCreatedAt ? String(opts.minCreatedAt).trim() : '';
+  const minCreatedMs = minCreatedAt ? Date.parse(minCreatedAt) : NaN;
   const byMonth = {};
   const ensureMonth = (m) => {
     if (!byMonth[m]) {
@@ -1839,22 +1866,34 @@ function aggregateShopifyFinances(orders = [], draftOrders = [], opts = {}) {
     return byMonth[m];
   };
 
-  const allOrderIds = new Set();
+  const includedOrderIds = new Set();
+  const excludedOrderIds = new Set();
   const normalizedOrders = [];
   const summary = createZeroShopifySummary();
 
   for (const o of Array.isArray(orders) ? orders : []) {
     if (!o || typeof o !== 'object') continue;
     const idStr = o.id != null ? String(o.id) : '';
-    if (idStr) allOrderIds.add(idStr);
 
     if (o.test === true) {
+      if (idStr) excludedOrderIds.add(idStr);
       summary.testOrdersCount++;
       continue;
     }
 
-    summary.orderCount++;
     const createdIso = o.created_at || o.processed_at || o.updated_at || new Date().toISOString();
+    const orderNum = extractShopifyOrderNumber(o);
+    const createdMs = Date.parse(createdIso);
+    const beforeMinOrder = minOrderNum > 0 && orderNum > 0 && orderNum < minOrderNum;
+    const beforeMinDate = Number.isFinite(minCreatedMs) && Number.isFinite(createdMs) && createdMs < minCreatedMs;
+    if (beforeMinOrder || beforeMinDate) {
+      if (idStr) excludedOrderIds.add(idStr);
+      summary.excludedLegacyOrdersCount++;
+      continue;
+    }
+
+    if (idStr) includedOrderIds.add(idStr);
+    summary.orderCount++;
     const { month, date } = formatShopifyDateParts(createdIso, timeZone);
     const fs = String(o.financial_status || '').toLowerCase().trim();
     const cancelled = Boolean(o.cancelled_at) || fs === 'voided';
@@ -1958,6 +1997,13 @@ function aggregateShopifyFinances(orders = [], draftOrders = [], opts = {}) {
     const linkedOrderId = d.order_id != null ? String(d.order_id) : null;
     const status = String(d.status || '').toLowerCase().trim();
     const createdIso = d.created_at || d.updated_at || new Date().toISOString();
+    const draftCreatedMs = Date.parse(createdIso);
+    if (status === 'completed') {
+      if (linkedOrderId && excludedOrderIds.has(linkedOrderId)) continue;
+      if (!linkedOrderId && Number.isFinite(minCreatedMs) && Number.isFinite(draftCreatedMs) && draftCreatedMs < minCreatedMs) {
+        continue;
+      }
+    }
     const { month, date } = formatShopifyDateParts(createdIso, timeZone);
     const totalPrice = round2(Number(d.total_price || 0));
     const customerName =
@@ -1971,7 +2017,7 @@ function aggregateShopifyFinances(orders = [], draftOrders = [], opts = {}) {
         .map((li) => `${Number(li?.quantity || 1) > 1 ? `${li.quantity}x ` : ''}${li?.title || li?.name || 'Item'}`)
         .filter(Boolean)
         .join(', ') || 'Draft Order';
-    const dedupedWithOrder = status === 'completed' && Boolean(linkedOrderId && allOrderIds.has(linkedOrderId));
+    const dedupedWithOrder = status === 'completed' && Boolean(linkedOrderId && includedOrderIds.has(linkedOrderId));
     const adminUrl = `https://admin.shopify.com/store/${shopHandle}/draft_orders/${dId}`;
 
     if (status === 'open' || status === 'invoice_sent') {
@@ -2038,7 +2084,17 @@ function aggregateShopifyFinances(orders = [], draftOrders = [], opts = {}) {
     byMonth[m].orders.sort(byDateDesc);
   }
 
-  return { summary, byMonth, orders: normalizedOrders, draftOrders: normalizedDrafts };
+  return {
+    cutoff: {
+      minOrderNumber: minOrderNum,
+      minCreatedAt: minCreatedAt || null,
+      excludedLegacyOrdersCount: summary.excludedLegacyOrdersCount,
+    },
+    summary,
+    byMonth,
+    orders: normalizedOrders,
+    draftOrders: normalizedDrafts,
+  };
 }
 
 async function getShopifyAdminAccessToken({ env = process.env, fetchImpl = globalThis.fetch, cache = new Map(), forceRefresh = false }) {
@@ -2130,7 +2186,7 @@ async function fetchLiveShopifyFinances({ env = process.env, refresh = false, fe
     };
   }
 
-  const finCacheKey = `shopify:finances:${auth.shopDomain}`;
+  const finCacheKey = `shopify:finances:${auth.shopDomain}:${auth.minOrderNumber}:${auth.minCreatedAt}`;
   if (!refresh) {
     const cached = cache.get(finCacheKey);
     if (cached && cached.expiresAt > Date.now()) {
@@ -2161,6 +2217,8 @@ async function fetchLiveShopifyFinances({ env = process.env, refresh = false, fe
   const agg = aggregateShopifyFinances(rawData.orders, rawData.draftOrders, {
     shopHandle: auth.shopHandle,
     timeZone: 'America/New_York',
+    minOrderNumber: auth.minOrderNumber,
+    minCreatedAt: auth.minCreatedAt,
   });
   const nowIso = new Date().toISOString();
   const payload = {

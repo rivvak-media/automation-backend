@@ -1727,7 +1727,7 @@ async function runTests() {
               line_items: [{ title: 'Pool Build Invoice', quantity: 1 }],
             },
           ],
-          { shopHandle: 'fdguvq-yv', timeZone: 'America/New_York' }
+          { shopHandle: 'fdguvq-yv', timeZone: 'America/New_York', minOrderNumber: 0, minCreatedAt: '' }
         );
 
         // #1032 (900) + #1038 (400, NOT doubled by #D37) + #1039 paid part (300) = 1600
@@ -1742,6 +1742,49 @@ async function runTests() {
         assert.strictEqual(agg.byMonth['2026-10'].netRevenue, 0);
         assert.strictEqual(agg.byMonth['2026-10'].refunded, 250);
         assert.strictEqual(agg.draftOrders.find((d) => d.name === '#D37').dedupedWithOrder, true);
+
+        // Cutoff verification: disregard all legacy/test orders before #1038 (2026-11-22T22:48:33-05:00)
+        const cutoffAgg = aggregateShopifyFinances(
+          [
+            {
+              id: 19045737431360,
+              name: '#1037',
+              created_at: '2026-11-14T22:09:22-05:00',
+              financial_status: 'paid',
+              total_price: '11.21',
+              current_total_price: '11.21',
+              customer: { first_name: 'ghost', last_name: 'Customer' },
+            },
+            {
+              id: 19067276722496,
+              name: '#1038',
+              created_at: '2026-11-22T22:48:33-05:00',
+              financial_status: 'paid',
+              total_price: '400.00',
+              current_total_price: '400.00',
+              source_name: 'shopify_draft_order',
+              customer: { first_name: 'Carleen', last_name: 'Ligozio' },
+              line_items: [{ title: 'Website Carleen Ligozio', quantity: 1 }],
+            },
+          ],
+          [
+            {
+              id: 1632323797312,
+              name: '#D37',
+              status: 'completed',
+              order_id: 19067276722496,
+              total_price: '400.00',
+              created_at: '2026-11-21T16:33:27-05:00',
+            },
+          ],
+          { shopHandle: 'fdguvq-yv', timeZone: 'America/New_York', minOrderNumber: 1038, minCreatedAt: '2026-11-22T22:48:33-05:00' }
+        );
+        assert.strictEqual(cutoffAgg.summary.excludedLegacyOrdersCount, 1);
+        assert.strictEqual(cutoffAgg.summary.orderCount, 1);
+        assert.strictEqual(cutoffAgg.summary.allTimeNet, 400);
+        assert.strictEqual(cutoffAgg.orders.length, 1);
+        assert.strictEqual(cutoffAgg.orders[0].name, '#1038');
+        assert.strictEqual(cutoffAgg.draftOrders.find((d) => d.name === '#D37').dedupedWithOrder, true);
 
         // Auth + Graceful Unconfigured 200 check on baseUrl (no Shopify keys configured in base test server)
         const unauth = await jsonReq(baseUrl, '/api/admin/shopify-finances');
@@ -1816,12 +1859,21 @@ async function runTests() {
                     orders: [
                       {
                         id: 2001,
-                        name: '#1032',
-                        created_at: '2026-11-12T12:50:00-05:00',
+                        name: '#1038',
+                        created_at: '2026-11-22T22:48:33-05:00',
                         financial_status: 'paid',
-                        total_price: '900.00',
-                        current_total_price: '900.00',
-                        line_items: [{ title: 'Retainer', quantity: 1 }],
+                        total_price: '400.00',
+                        current_total_price: '400.00',
+                        line_items: [{ title: 'Website Carleen Ligozio', quantity: 1 }],
+                      },
+                      {
+                        id: 2003,
+                        name: '#1039',
+                        created_at: '2026-11-23T15:00:00-05:00',
+                        financial_status: 'paid',
+                        total_price: '511.21',
+                        current_total_price: '511.21',
+                        line_items: [{ title: 'Growth Retainer', quantity: 1 }],
                       },
                     ],
                   }),
@@ -1835,12 +1887,12 @@ async function runTests() {
                   json: async () => ({
                     draft_orders: [
                       {
-                        id: 1632323797312,
-                        name: '#D37',
+                        id: 1632323797313,
+                        name: '#D38',
                         status: 'open',
                         total_price: '400.00',
-                        created_at: '2026-11-22T22:48:00-05:00',
-                        line_items: [{ title: 'Website Carleen Ligozio', quantity: 1 }],
+                        created_at: '2026-11-23T16:00:00-05:00',
+                        line_items: [{ title: 'Pool Invoice', quantity: 1 }],
                       },
                     ],
                   }),
@@ -1856,6 +1908,7 @@ async function runTests() {
           assert.strictEqual(oauthCalls, 2, 'Should refresh OAuth token once after 401');
           assert.strictEqual(finRes.data.summary.allTimeNet, 911.21);
           assert.strictEqual(finRes.data.summary.openDraftsTotal, 400);
+          assert.strictEqual(finRes.data.summary.excludedLegacyOrdersCount, 1);
           assert.strictEqual(finRes.data.orders.length, 2);
 
           const intLive = await jsonReq(shServer.url, '/api/admin/integrations', { token: 'Jh22mp21??.' });
