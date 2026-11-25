@@ -27,6 +27,10 @@ const {
   parseDotEnvFile,
   buildIntegrationsStatus,
   aggregateShopifyFinances,
+  createShopifyDraftOrderInvoice,
+  fetchShopifyDraftOrderStatus,
+  createDefaultOnboarding,
+  normalizeOnboarding,
 } = require('./server');
 
 /**
@@ -1919,6 +1923,560 @@ async function runTests() {
           if (shServer) await shServer.stop().catch(() => {});
           fs.rmSync(shTmpDir, { recursive: true, force: true });
         }
+      }),
+
+      check('27. Onboarding schema, CORS PATCH, POST /api/admin/clients/onboard (new/update) & zero-em-dash welcome email', async () => {
+        // 1. Direct helper checks
+        const defOb = createDefaultOnboarding(
+          { slug: 'sample-co', business: 'Sample Co', setupUsd: 1500, monthlyUsd: 400 },
+          { slug: 'sample-co', business: 'Sample Co' }
+        );
+        assert.strictEqual(defOb.agreement.version, '2026.1');
+        assert.strictEqual(
+          defOb.agreement.ownershipClause,
+          '100% client ownership of code, domain, and brand assets with zero lock in.'
+        );
+        assert.strictEqual(
+          defOb.agreement.timelineText,
+          '72 hour interactive staging preview, 7 to 14 day production launch'
+        );
+        assert.strictEqual(defOb.welcome.whatHappensNext.length, 5);
+        assert.strictEqual(defOb.welcome.supportEmail, 'connect@rivvak.com');
+        assert.strictEqual(defOb.welcome.supportPhone, '(728) 231-6974');
+        assert.strictEqual(defOb.shopifyInvoice.totalUsd, 1900);
+        assert.ok(defOb.milestones.some((m) => m.title === 'Send & Sign Client Agreement'));
+        assert.ok(defOb.milestones.some((m) => m.title === 'Schedule Kickoff Strategy Call'));
+        assert.strictEqual(defOb.portalUrl, 'https://rivvak.com/pages/client-portal?client=sample-co');
+
+        const normPartial = normalizeOnboarding({}, { slug: 'legacy-co', business: 'Legacy Co' });
+        assert.strictEqual(normPartial.agreement.status, 'draft');
+        assert.strictEqual(normPartial.shopifyInvoice.status, 'not_created');
+
+        // 2. CORS preflight PATCH check from https://rivvak.com
+        const corsPre = await fetch(`${baseUrl}/api/admin/clients/clean-results/onboarding`, {
+          method: 'OPTIONS',
+          headers: { Origin: 'https://rivvak.com', 'Access-Control-Request-Method': 'PATCH' },
+        });
+        assert.strictEqual(corsPre.status, 204);
+        const allowMethods = corsPre.headers.get('access-control-allow-methods') || '';
+        assert.ok(allowMethods.includes('PATCH'), `Expected PATCH in CORS methods, got: ${allowMethods}`);
+
+        // 3. Seeded client + POST /api/admin/clients have onboarding
+        const bdpSync = await jsonReq(baseUrl, '/api/client/blue-diamond-pools/sync', { token: 'BLUEDIAMOND-2026' });
+        assert.strictEqual(bdpSync.status, 200);
+        assert.strictEqual(bdpSync.data.client.onboarding.agreement.version, '2026.1');
+
+        const createdBasic = await jsonReq(baseUrl, '/api/admin/clients', {
+          method: 'POST',
+          token: 'Jh22mp21??.',
+          body: { business: 'Basic Studio', owner: 'Alex', email: 'alex@basicstudio.example.com' },
+        });
+        assert.strictEqual(createdBasic.status, 201);
+        assert.strictEqual(createdBasic.data.client.onboarding.welcome.supportEmail, 'connect@rivvak.com');
+
+        // 4. Client token blocked from POST /api/admin/clients/onboard
+        const clientBlocked = await jsonReq(baseUrl, '/api/admin/clients/onboard', {
+          method: 'POST',
+          token: 'CARLEEN-2026',
+          body: { business: 'Blocked Co' },
+        });
+        assert.strictEqual(clientBlocked.status, 403);
+
+        // 5. POST /api/admin/clients/onboard creates new client (201) with dry-run invoice & welcome email
+        const onboardNew = await jsonReq(baseUrl, '/api/admin/clients/onboard', {
+          method: 'POST',
+          token: 'Jh22mp21??.',
+          body: {
+            slug: 'apex-roofing',
+            business: 'Apex Roofing South Florida',
+            owner: 'Jordan Apex',
+            email: 'jordan@apexroofing.example.com',
+            phone: '(561) 555-0199',
+            setupUsd: 1950,
+            monthlyUsd: 500,
+            scopeSummary: 'High converting roofing website, instant roof quote calculator, and Growth OS CRM.',
+            createShopifyInvoice: true,
+            sendWelcomeEmail: true,
+            dryRun: true,
+          },
+        });
+        assert.strictEqual(onboardNew.status, 201);
+        assert.strictEqual(onboardNew.data.ok, true);
+        assert.strictEqual(onboardNew.data.slug, 'apex-roofing');
+        assert.ok(onboardNew.data.accessCode);
+        assert.strictEqual(
+          onboardNew.data.portalUrl,
+          'https://rivvak.com/pages/client-portal?client=apex-roofing'
+        );
+        assert.strictEqual(
+          onboardNew.data.portalMagicUrl,
+          `https://rivvak.com/pages/client-portal?client=apex-roofing&code=${encodeURIComponent(onboardNew.data.accessCode)}`
+        );
+        assert.strictEqual(onboardNew.data.shopifyInvoice.mode, 'dry_run');
+        assert.strictEqual(onboardNew.data.shopifyInvoice.draftOrderId, null);
+        assert.strictEqual(onboardNew.data.shopifyInvoice.invoiceUrl, 'https://rivvak.com/pages/pricing');
+        assert.strictEqual(onboardNew.data.shopifyInvoice.status, 'open');
+        assert.strictEqual(onboardNew.data.shopifyInvoice.setupUsd, 1950);
+        assert.strictEqual(onboardNew.data.shopifyInvoice.monthlyUsd, 500);
+        assert.strictEqual(onboardNew.data.shopifyInvoice.totalUsd, 2450);
+        assert.strictEqual(onboardNew.data.welcomeEmail.mode, 'dry_run');
+        assert.strictEqual(onboardNew.data.client.onboarding.agreement.status, 'sent');
+
+        // 6. Calling onboard again for same slug updates existing client (200)
+        const onboardUpd = await jsonReq(baseUrl, '/api/admin/clients/onboard', {
+          method: 'POST',
+          token: 'Jh22mp21??.',
+          body: {
+            slug: 'apex-roofing',
+            setupUsd: 2200,
+            monthlyUsd: 500,
+          },
+        });
+        assert.strictEqual(onboardUpd.status, 200);
+        assert.strictEqual(onboardUpd.data.shopifyInvoice.setupUsd, 2200);
+        assert.strictEqual(onboardUpd.data.shopifyInvoice.totalUsd, 2700);
+
+        // 7. Verify live transactional welcome email content (zero em-dashes, official contacts only, zero secrets)
+        const mailTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rivvak-onboard-mail-'));
+        const capturedEmails = [];
+        let mailServer;
+        try {
+          mailServer = await startServer({
+            port: 0,
+            host: '127.0.0.1',
+            storePath: path.join(mailTmpDir, 'store.json'),
+            envPath: path.join(mailTmpDir, '.env.missing'),
+            enableScheduler: false,
+            env: {
+              ADMIN_PASSCODE: 'Jh22mp21??.',
+              SMTP_HOST: 'smtp.example.local',
+              SMTP_USER: 'connect@rivvak.com',
+              SMTP_PASS: 'super-secret-smtp-pass',
+            },
+            smtpSendImpl: async (cfg) => {
+              capturedEmails.push(cfg);
+              return { ok: true, messageId: '<onboard-test@rivvak.com>', response: '250 OK' };
+            },
+          });
+          const liveOnboard = await jsonReq(mailServer.url, '/api/admin/clients/onboard', {
+            method: 'POST',
+            token: 'Jh22mp21??.',
+            body: {
+              slug: 'palm-wellness',
+              business: 'Palm Wellness Clinic',
+              owner: 'Dr. Nina',
+              email: 'nina@palmwellness.example.com',
+              setupUsd: 1200,
+              monthlyUsd: 350,
+              createShopifyInvoice: true,
+              sendWelcomeEmail: true,
+            },
+          });
+          assert.strictEqual(liveOnboard.status, 201);
+          assert.strictEqual(liveOnboard.data.welcomeEmail.mode, 'live_smtp');
+          assert.strictEqual(capturedEmails.length, 1);
+          const sentText = capturedEmails[0].text;
+          assert.ok(sentText.includes(liveOnboard.data.portalMagicUrl));
+          assert.ok(sentText.includes('connect@rivvak.com'));
+          assert.ok(sentText.includes('(728) 231-6974'));
+          assert.ok(!sentText.includes('\u2014'), 'Welcome email must contain zero em-dashes');
+          assert.ok(!sentText.includes('\u2013'), 'Welcome email must contain zero en-dashes');
+          assert.ok(!sentText.includes('Jh22mp21??.'), 'Welcome email must never leak admin passcode');
+          assert.ok(!sentText.includes('super-secret-smtp-pass'), 'Welcome email must never leak SMTP secret');
+        } finally {
+          if (mailServer) await mailServer.stop().catch(() => {});
+          fs.rmSync(mailTmpDir, { recursive: true, force: true });
+        }
+      }),
+
+      check('28. Shopify Draft Order invoice create, send_invoice, sync-payment & dry-run fallback', async () => {
+        // Direct unit dry-run & missing-credentials checks
+        const dryDirect = await createShopifyDraftOrderInvoice(
+          { SHOPIFY_CLIENT_ID: 'cid', SHOPIFY_CLIENT_SECRET: 'csec' },
+          { dryRun: true, setupUsd: 1950, monthlyUsd: 500 }
+        );
+        assert.strictEqual(dryDirect.ok, true);
+        assert.strictEqual(dryDirect.mode, 'dry_run');
+        assert.strictEqual(dryDirect.draftOrderId, null);
+        assert.strictEqual(dryDirect.invoiceUrl, 'https://rivvak.com/pages/pricing');
+        assert.strictEqual(dryDirect.status, 'open');
+
+        const missingDirect = await createShopifyDraftOrderInvoice({}, { setupUsd: 1000 });
+        assert.strictEqual(missingDirect.ok, true);
+        assert.strictEqual(missingDirect.mode, 'dry_run');
+        assert.strictEqual(missingDirect.draftOrderId, null);
+        assert.strictEqual(missingDirect.invoiceUrl, 'https://rivvak.com/pages/pricing');
+
+        const missingStatus = await fetchShopifyDraftOrderStatus({}, '99999');
+        assert.strictEqual(missingStatus.ok, true);
+        assert.strictEqual(missingStatus.mode, 'dry_run');
+
+        // Live mocked Shopify Draft Orders flow
+        const shInvTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rivvak-shopify-inv-'));
+        let shInvServer;
+        let syncCallCount = 0;
+        const recordedCalls = [];
+        try {
+          shInvServer = await startServer({
+            port: 0,
+            host: '127.0.0.1',
+            storePath: path.join(shInvTmpDir, 'store.json'),
+            envPath: path.join(shInvTmpDir, '.env.missing'),
+            enableScheduler: false,
+            env: {
+              ADMIN_PASSCODE: 'Jh22mp21??.',
+              SHOPIFY_SHOP_DOMAIN: 'fdguvq-yv.myshopify.com',
+              SHOPIFY_CLIENT_ID: 'cid_inv_123',
+              SHOPIFY_CLIENT_SECRET: 'csec_inv_456',
+            },
+            fetchImpl: async (targetUrl, init = {}) => {
+              const u = String(targetUrl);
+              recordedCalls.push({ method: init.method || 'GET', url: u, body: init.body });
+              if (u.includes('/admin/oauth/access_token')) {
+                return {
+                  ok: true,
+                  status: 200,
+                  json: async () => ({ access_token: 'shpat_inv_mock', expires_in: 86400 }),
+                };
+              }
+              if (u.endsWith('/admin/api/2026-01/draft_orders.json') && init.method === 'POST') {
+                return {
+                  ok: true,
+                  status: 201,
+                  json: async () => ({
+                    draft_order: {
+                      id: 987654,
+                      name: '#D98',
+                      status: 'open',
+                      order_id: null,
+                      invoice_url: 'https://fdguvq-yv.myshopify.com/12345/invoices/abc123',
+                      total_price: '2450.00',
+                      currency: 'USD',
+                    },
+                  }),
+                };
+              }
+              if (u.endsWith('/admin/api/2026-01/draft_orders/987654/send_invoice.json') && init.method === 'POST') {
+                return {
+                  ok: true,
+                  status: 200,
+                  json: async () => ({ draft_order_invoice: { to: 'connect@rivvak.com' } }),
+                };
+              }
+              if (u.endsWith('/admin/api/2026-01/draft_orders/987654.json')) {
+                syncCallCount++;
+                if (syncCallCount === 1) {
+                  return {
+                    ok: true,
+                    status: 200,
+                    json: async () => ({
+                      draft_order: {
+                        id: 987654,
+                        name: '#D98',
+                        status: 'open',
+                        order_id: null,
+                        invoice_url: 'https://fdguvq-yv.myshopify.com/12345/invoices/abc123',
+                      },
+                    }),
+                  };
+                }
+                return {
+                  ok: true,
+                  status: 200,
+                  json: async () => ({
+                    draft_order: {
+                      id: 987654,
+                      name: '#D98',
+                      status: 'completed',
+                      order_id: 5550001,
+                      completed_at: '2026-11-25T18:30:00Z',
+                      invoice_url: 'https://fdguvq-yv.myshopify.com/12345/invoices/abc123',
+                    },
+                  }),
+                };
+              }
+              return { ok: false, status: 404, json: async () => ({ error: 'Unexpected endpoint' }) };
+            },
+          });
+
+          const invCreate = await jsonReq(shInvServer.url, '/api/admin/clients/clean-results/onboarding/shopify-invoice', {
+            method: 'POST',
+            token: 'Jh22mp21??.',
+            body: { setupUsd: 1950, monthlyUsd: 500, sendInvoiceEmail: true },
+          });
+          assert.strictEqual(invCreate.status, 200);
+          assert.strictEqual(invCreate.data.ok, true);
+          assert.strictEqual(invCreate.data.shopifyInvoice.draftOrderId, '987654');
+          assert.strictEqual(invCreate.data.shopifyInvoice.invoiceNumber, '#D98');
+          assert.strictEqual(invCreate.data.shopifyInvoice.status, 'invoice_sent');
+          assert.strictEqual(invCreate.data.shopifyInvoice.mode, 'live_shopify');
+          assert.ok(invCreate.data.shopifyInvoice.sentAt);
+          assert.ok(recordedCalls.some((c) => c.url.includes('/draft_orders/987654/send_invoice.json')));
+
+          // Sync payment #1: still open
+          const syncOpen = await jsonReq(shInvServer.url, '/api/admin/clients/clean-results/onboarding/sync-payment', {
+            method: 'POST',
+            token: 'Jh22mp21??.',
+            body: {},
+          });
+          assert.strictEqual(syncOpen.status, 200);
+          assert.strictEqual(syncOpen.data.shopifyInvoice.status, 'open');
+          assert.ok(syncOpen.data.shopifyInvoice.lastSyncedAt);
+
+          // Sync payment #2: completed -> paid + orderId + invoice milestone Done
+          const syncPaid = await jsonReq(shInvServer.url, '/api/admin/clients/clean-results/onboarding/sync-payment', {
+            method: 'POST',
+            token: 'Jh22mp21??.',
+            body: {},
+          });
+          assert.strictEqual(syncPaid.status, 200);
+          assert.strictEqual(syncPaid.data.shopifyInvoice.status, 'paid');
+          assert.strictEqual(syncPaid.data.shopifyInvoice.orderId, '5550001');
+          assert.ok(syncPaid.data.shopifyInvoice.paidAt);
+          const invMilestone = syncPaid.data.client.onboarding.milestones.find((m) => m.id === 'ms_p1_invoice');
+          assert.strictEqual(invMilestone.discovery, 'Done');
+
+          // Dry-run endpoint check even when credentials exist
+          const invDry = await jsonReq(shInvServer.url, '/api/admin/clients/blue-diamond-pools/onboarding/shopify-invoice', {
+            method: 'POST',
+            token: 'Jh22mp21??.',
+            body: { setupUsd: 1950, monthlyUsd: 500, dryRun: true },
+          });
+          assert.strictEqual(invDry.status, 200);
+          assert.strictEqual(invDry.data.shopifyInvoice.mode, 'dry_run');
+          assert.strictEqual(invDry.data.shopifyInvoice.draftOrderId, null);
+          assert.strictEqual(invDry.data.shopifyInvoice.invoiceUrl, 'https://rivvak.com/pages/pricing');
+        } finally {
+          if (shInvServer) await shInvServer.stop().catch(() => {});
+          fs.rmSync(shInvTmpDir, { recursive: true, force: true });
+        }
+      }),
+
+      check('29. Client SHA-256 agreement signing, cross-tenant 403 isolation & tamper protection', async () => {
+        // Ensure apex-roofing client exists from Test 27
+        const stateRes = await jsonReq(baseUrl, '/api/state', { token: 'Jh22mp21??.' });
+        assert.strictEqual(stateRes.status, 200);
+        const apexClient = stateRes.data.clients['apex-roofing'];
+        assert.ok(apexClient && apexClient.accessCode);
+        const apexCode = apexClient.accessCode;
+
+        // Cross-tenant 403 isolation: Carleen cannot hit apex-roofing onboarding endpoints
+        for (const sub of ['sign-agreement', 'schedule-call', 'assets']) {
+          const cross = await jsonReq(baseUrl, `/api/client/apex-roofing/onboarding/${sub}`, {
+            method: 'POST',
+            token: 'CARLEEN-2026',
+            body: { signerName: 'Intruder', accepted: true, scheduledIso: '2026-12-01T16:00:00Z', label: 'X', url: '/x' },
+          });
+          assert.strictEqual(cross.status, 403, `Expected 403 on cross-tenant /${sub}`);
+        }
+
+        // Client token blocked on admin onboarding endpoints
+        for (const [m, p] of [
+          ['POST', '/api/admin/clients/apex-roofing/onboarding/shopify-invoice'],
+          ['POST', '/api/admin/clients/apex-roofing/onboarding/sync-payment'],
+          ['POST', '/api/admin/clients/apex-roofing/onboarding/send-welcome'],
+          ['PATCH', '/api/admin/clients/apex-roofing/onboarding'],
+        ]) {
+          const forbiddenAdmin = await jsonReq(baseUrl, p, { method: m, token: apexCode, body: {} });
+          assert.strictEqual(forbiddenAdmin.status, 403, `Expected 403 for client calling ${m} ${p}`);
+        }
+
+        // Validation 400 checks on sign-agreement
+        const badName = await jsonReq(baseUrl, '/api/client/apex-roofing/onboarding/sign-agreement', {
+          method: 'POST',
+          token: apexCode,
+          body: { signerName: '   ', accepted: true },
+        });
+        assert.strictEqual(badName.status, 400);
+
+        const badAccepted = await jsonReq(baseUrl, '/api/client/apex-roofing/onboarding/sign-agreement', {
+          method: 'POST',
+          token: apexCode,
+          body: { signerName: 'Jordan Apex', accepted: false },
+        });
+        assert.strictEqual(badAccepted.status, 400);
+
+        // Valid signing by client tenant
+        const signRes = await jsonReq(baseUrl, '/api/client/apex-roofing/onboarding/sign-agreement', {
+          method: 'POST',
+          token: apexCode,
+          headers: { 'User-Agent': 'RivvakTestAgent/2.0' },
+          body: {
+            signerName: 'Jordan Apex',
+            signerTitle: 'Managing Partner',
+            signerEmail: 'jordan@apexroofing.example.com',
+            accepted: true,
+            dryRun: true,
+          },
+        });
+        assert.strictEqual(signRes.status, 200);
+        assert.strictEqual(signRes.data.ok, true);
+        assert.strictEqual(signRes.data.agreement.status, 'signed');
+        assert.strictEqual(signRes.data.agreement.signerName, 'Jordan Apex');
+        assert.strictEqual(signRes.data.agreement.signerTitle, 'Managing Partner');
+        assert.strictEqual(signRes.data.agreement.userAgent, 'RivvakTestAgent/2.0');
+        assert.ok(/^[0-9a-f]{64}$/.test(signRes.data.agreement.agreementHash));
+        assert.strictEqual(signRes.data.emailConfirmation.mode, 'dry_run');
+
+        // Recompute canonical SHA-256 independently to verify integrity
+        const obAfterSign = signRes.data.client.onboarding;
+        const expectedCanonical = JSON.stringify({
+          agreementId: obAfterSign.agreement.agreementId,
+          version: obAfterSign.agreement.version,
+          slug: 'apex-roofing',
+          business: signRes.data.client.business,
+          scopeSummary: obAfterSign.agreement.scopeSummary,
+          deliverables: obAfterSign.agreement.deliverables,
+          timelineText: obAfterSign.agreement.timelineText,
+          paymentTerms: obAfterSign.agreement.paymentTerms,
+          ownershipClause: obAfterSign.agreement.ownershipClause,
+          setupUsd: obAfterSign.shopifyInvoice.setupUsd,
+          monthlyUsd: obAfterSign.shopifyInvoice.monthlyUsd,
+          totalUsd: obAfterSign.shopifyInvoice.totalUsd,
+          signedAt: obAfterSign.agreement.signedAt,
+          signerName: 'Jordan Apex',
+          signerTitle: 'Managing Partner',
+          signerEmail: 'jordan@apexroofing.example.com',
+        });
+        const expectedHash = crypto.createHash('sha256').update(expectedCanonical).digest('hex');
+        assert.strictEqual(signRes.data.agreement.agreementHash, expectedHash);
+
+        // Agreement milestone flipped to Done
+        const agRow = obAfterSign.milestones.find((m) => m.title === 'Send & Sign Client Agreement');
+        assert.strictEqual(agRow.discovery, 'Done');
+
+        // Client PUT /sync preserves signed agreement & does not allow client tampering
+        const clientPut = await jsonReq(baseUrl, '/api/client/apex-roofing/sync', {
+          method: 'PUT',
+          token: apexCode,
+          body: {
+            onboarding: {
+              agreement: { status: 'draft', agreementHash: 'tampered' },
+              shopifyInvoice: { status: 'paid' },
+            },
+          },
+        });
+        assert.strictEqual(clientPut.status, 200);
+        assert.strictEqual(clientPut.data.client.onboarding.agreement.status, 'signed');
+        assert.strictEqual(clientPut.data.client.onboarding.agreement.agreementHash, expectedHash);
+        assert.notStrictEqual(clientPut.data.client.onboarding.shopifyInvoice.status, 'paid');
+      }),
+
+      check('30. Strategy call booking + milestone flip, asset upload, send-welcome & admin PATCH', async () => {
+        const stateRes = await jsonReq(baseUrl, '/api/state', { token: 'Jh22mp21??.' });
+        const apexCode = stateRes.data.clients['apex-roofing'].accessCode;
+
+        // Schedule call validation
+        const badCall = await jsonReq(baseUrl, '/api/client/apex-roofing/onboarding/schedule-call', {
+          method: 'POST',
+          token: apexCode,
+          body: { scheduledIso: 'not-a-date', platform: 'Zoom' },
+        });
+        assert.strictEqual(badCall.status, 400);
+
+        const badPlatform = await jsonReq(baseUrl, '/api/client/apex-roofing/onboarding/schedule-call', {
+          method: 'POST',
+          token: apexCode,
+          body: { scheduledIso: '2026-12-01T16:00:00Z', platform: 'Carrier Pigeon' },
+        });
+        assert.strictEqual(badPlatform.status, 400);
+
+        // Valid strategy call booking
+        const callRes = await jsonReq(baseUrl, '/api/client/apex-roofing/onboarding/schedule-call', {
+          method: 'POST',
+          token: apexCode,
+          body: {
+            scheduledIso: '2026-12-01T16:00:00Z',
+            platform: 'Zoom',
+            timezone: 'America/New_York',
+            notes: 'Focus on Broward and Palm Beach storm roof inspections',
+            dryRun: true,
+          },
+        });
+        assert.strictEqual(callRes.status, 200);
+        assert.strictEqual(callRes.data.strategyCall.status, 'scheduled');
+        assert.strictEqual(callRes.data.strategyCall.platform, 'Zoom');
+        assert.strictEqual(callRes.data.emailConfirmation.mode, 'dry_run');
+        assert.ok(callRes.data.client.bookings.some((b) => b.sessionType === 'Kickoff Strategy Call (Zoom)'));
+        const callRow = callRes.data.client.onboarding.milestones.find(
+          (m) => m.title === 'Schedule Kickoff Strategy Call'
+        );
+        assert.strictEqual(callRow.discovery, 'Done');
+
+        // Asset upload validation (empty and javascript: URL)
+        const badAssetEmpty = await jsonReq(baseUrl, '/api/client/apex-roofing/onboarding/assets', {
+          method: 'POST',
+          token: apexCode,
+          body: {},
+        });
+        assert.strictEqual(badAssetEmpty.status, 400);
+
+        const badAssetUrl = await jsonReq(baseUrl, '/api/client/apex-roofing/onboarding/assets', {
+          method: 'POST',
+          token: apexCode,
+          body: { label: 'XSS', url: 'javascript:alert(1)' },
+        });
+        assert.strictEqual(badAssetUrl.status, 400);
+
+        // Valid asset + note upload
+        const assetRes = await jsonReq(baseUrl, '/api/client/apex-roofing/onboarding/assets', {
+          method: 'POST',
+          token: apexCode,
+          body: {
+            label: 'Primary Vector Logo',
+            url: 'https://cdn.example.com/apex-logo.svg',
+            category: 'asset',
+            note: 'Prefer matte slate and emerald accents on calculator CTA.',
+          },
+        });
+        assert.strictEqual(assetRes.status, 200);
+        assert.ok(assetRes.data.deliverables.some((d) => d.label === 'Primary Vector Logo' && d.addedBy === 'client'));
+        assert.ok(
+          assetRes.data.clientNotes.some((n) => n.text.includes('Prefer matte slate and emerald accents'))
+        );
+        const assetRow = assetRes.data.client.onboarding.milestones.find((m) => m.id === 'ms_p1_assets');
+        assert.strictEqual(assetRow.discovery, 'In Progress');
+
+        // Admin send-welcome resend
+        const resendRes = await jsonReq(baseUrl, '/api/admin/clients/apex-roofing/onboarding/send-welcome', {
+          method: 'POST',
+          token: 'Jh22mp21??.',
+          body: { dryRun: true },
+        });
+        assert.strictEqual(resendRes.status, 200);
+        assert.strictEqual(resendRes.data.welcomeEmail.mode, 'dry_run');
+        assert.ok(resendRes.data.client.onboarding.welcome.sentAt);
+
+        // Admin PATCH onboarding (milestone update + agency deliverable + launchedAt)
+        const patchRes = await jsonReq(baseUrl, '/api/admin/clients/apex-roofing/onboarding', {
+          method: 'PATCH',
+          token: 'Jh22mp21??.',
+          body: {
+            milestoneUpdate: { id: 'ms_p2_preview', field: 'review', value: 'Done' },
+            addDeliverable: {
+              label: '72 Hour Interactive Staging Preview',
+              url: 'https://rivvak.com/demo/roofing',
+              category: 'staging',
+            },
+            launchedAt: '2026-12-05T15:00:00.000Z',
+          },
+        });
+        assert.strictEqual(patchRes.status, 200);
+        assert.strictEqual(patchRes.data.onboarding.launchedAt, '2026-12-05T15:00:00.000Z');
+        const previewRow = patchRes.data.onboarding.milestones.find((m) => m.id === 'ms_p2_preview');
+        assert.strictEqual(previewRow.review, 'Done');
+        assert.ok(
+          patchRes.data.onboarding.deliverables.some(
+            (d) => d.url === 'https://rivvak.com/demo/roofing' && d.category === 'staging' && d.addedBy === 'agency'
+          )
+        );
+
+        // Final sync confirms full persistence
+        const finalSync = await jsonReq(baseUrl, '/api/client/apex-roofing/sync', { token: apexCode });
+        assert.strictEqual(finalSync.status, 200);
+        assert.strictEqual(finalSync.data.client.onboarding.agreement.status, 'signed');
+        assert.strictEqual(finalSync.data.client.onboarding.strategyCall.status, 'scheduled');
+        assert.strictEqual(finalSync.data.client.onboarding.launchedAt, '2026-12-05T15:00:00.000Z');
       }),
     ];
 

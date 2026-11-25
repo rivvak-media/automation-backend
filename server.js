@@ -1080,6 +1080,614 @@ function createDefaultStore(env = process.env) {
       updatedAt: null,
     },
   };
+  for (const [slug, client] of Object.entries(defaultStore.clients)) {
+    if (client && typeof client === 'object') {
+      if (!client.slug) client.slug = slug;
+      client.onboarding = createDefaultOnboarding({}, client);
+    }
+  }
+  return defaultStore;
+}
+
+const OFFICIAL_SUPPORT_EMAIL = 'connect@rivvak.com';
+const OFFICIAL_SUPPORT_PHONE = '(728) 231-6974';
+const VALID_AGREEMENT_STATUSES = new Set(['draft', 'sent', 'signed']);
+const VALID_INVOICE_STATUSES = new Set(['not_created', 'open', 'invoice_sent', 'paid']);
+const VALID_CALL_STATUSES = new Set(['unscheduled', 'scheduled', 'completed']);
+const VALID_CALL_PLATFORMS = new Set(['Google Meet', 'Zoom', 'Phone Call']);
+const VALID_MILESTONE_STAGES = new Set(['Done', 'In Progress', 'Waiting', 'N/A']);
+const VALID_MILESTONE_FIELDS = new Set(['discovery', 'build', 'review', 'live']);
+const VALID_DELIVERABLE_CATEGORIES = new Set(['staging', 'document', 'asset', 'live']);
+const DEFAULT_PAYMENT_METHODS = [
+  'Shopify Pay',
+  'Apple Pay',
+  'Google Pay',
+  'Credit Card',
+  'ACH Bank Transfer',
+];
+
+function normalizeMilestoneStage(val, fallback = 'Waiting') {
+  const s = String(val || '').trim();
+  if (VALID_MILESTONE_STAGES.has(s)) return s;
+  const low = s.toLowerCase();
+  if (low === 'done' || low === 'complete' || low === 'completed') return 'Done';
+  if (low === 'in progress' || low === 'in_progress' || low === 'active') return 'In Progress';
+  if (low === 'n/a' || low === 'na') return 'N/A';
+  if (low === 'waiting' || low === 'pending') return 'Waiting';
+  return VALID_MILESTONE_STAGES.has(fallback) ? fallback : 'Waiting';
+}
+
+function buildDefaultPaymentTerms(setupUsd, monthlyUsd) {
+  const s = round2(Math.max(0, Number(setupUsd || 0)));
+  const m = round2(Math.max(0, Number(monthlyUsd || 0)));
+  if (s > 0 && m > 0) {
+    return `$${s.toLocaleString('en-US')} project setup plus $${m.toLocaleString('en-US')}/mo Growth OS retainer via Shopify Checkout. Month to month after initial build with zero lock in.`;
+  }
+  if (s > 0) {
+    return `$${s.toLocaleString('en-US')} one time project setup via Shopify Checkout. Zero lock in.`;
+  }
+  if (m > 0) {
+    return `$${m.toLocaleString('en-US')}/mo Growth OS retainer via Shopify Checkout. Month to month with zero lock in.`;
+  }
+  return 'Project investment and monthly Growth OS retainer billed securely via Shopify Checkout with zero lock in.';
+}
+
+function buildDefaultMilestones(nowIso = new Date().toISOString()) {
+  return [
+    {
+      id: 'ms_p1_agreement',
+      phase: 'Phase 1: Discovery & Onboarding',
+      title: 'Send & Sign Client Agreement',
+      discovery: 'In Progress',
+      build: 'N/A',
+      review: 'N/A',
+      live: 'N/A',
+      updatedAt: nowIso,
+    },
+    {
+      id: 'ms_p1_invoice',
+      phase: 'Phase 1: Discovery & Onboarding',
+      title: 'Complete Shopify Invoice & Kickoff Deposit',
+      discovery: 'Waiting',
+      build: 'N/A',
+      review: 'N/A',
+      live: 'N/A',
+      updatedAt: nowIso,
+    },
+    {
+      id: 'ms_p1_call',
+      phase: 'Phase 1: Discovery & Onboarding',
+      title: 'Schedule Kickoff Strategy Call',
+      discovery: 'Waiting',
+      build: 'N/A',
+      review: 'N/A',
+      live: 'N/A',
+      updatedAt: nowIso,
+    },
+    {
+      id: 'ms_p1_assets',
+      phase: 'Phase 1: Discovery & Onboarding',
+      title: 'Collect Brand Assets & Domain Access',
+      discovery: 'Waiting',
+      build: 'N/A',
+      review: 'N/A',
+      live: 'N/A',
+      updatedAt: nowIso,
+    },
+    {
+      id: 'ms_p2_preview',
+      phase: 'Phase 2: 72 Hour Preview & Core Build',
+      title: '72 Hour Interactive Staging Preview',
+      discovery: 'Done',
+      build: 'In Progress',
+      review: 'Waiting',
+      live: 'Waiting',
+      updatedAt: nowIso,
+    },
+    {
+      id: 'ms_p2_growth_os',
+      phase: 'Phase 2: 72 Hour Preview & Core Build',
+      title: 'Growth OS CRM, Inbox & Lead Automation Setup',
+      discovery: 'Waiting',
+      build: 'Waiting',
+      review: 'Waiting',
+      live: 'Waiting',
+      updatedAt: nowIso,
+    },
+    {
+      id: 'ms_p3_seo',
+      phase: 'Phase 3: QA, SEO & Launch',
+      title: 'Mobile QA, Local SEO Schema & Analytics Verification',
+      discovery: 'N/A',
+      build: 'Waiting',
+      review: 'Waiting',
+      live: 'Waiting',
+      updatedAt: nowIso,
+    },
+    {
+      id: 'ms_p3_launch',
+      phase: 'Phase 3: QA, SEO & Launch',
+      title: 'Production Domain Cutover & Go Live',
+      discovery: 'N/A',
+      build: 'Waiting',
+      review: 'Waiting',
+      live: 'Waiting',
+      updatedAt: nowIso,
+    },
+  ];
+}
+
+/**
+ * Create a clean default onboarding structure for a client.
+ * @param {object} [input]
+ * @param {object} [client]
+ * @returns {object}
+ */
+function createDefaultOnboarding(input = {}, client = {}) {
+  const src = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
+  const cl = client && typeof client === 'object' && !Array.isArray(client) ? client : {};
+  const nowIso = new Date().toISOString();
+
+  const slug =
+    String(src.slug || cl.slug || 'client')
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9-]+/g, '-')
+      .replace(/^-|-$/g, '') || 'client';
+  const business = String(src.business || cl.business || slug).trim() || slug;
+  const email = String(src.email || cl.email || '').trim();
+
+  const agIn = src.agreement && typeof src.agreement === 'object' ? src.agreement : {};
+  const invIn = src.shopifyInvoice && typeof src.shopifyInvoice === 'object' ? src.shopifyInvoice : {};
+  const welIn = src.welcome && typeof src.welcome === 'object' ? src.welcome : {};
+  const callIn = src.strategyCall && typeof src.strategyCall === 'object' ? src.strategyCall : {};
+
+  const setupUsd = round2(Math.max(0, parseMoney(src.setupUsd ?? invIn.setupUsd ?? agIn.setupUsd ?? 0)));
+  const monthlyUsd = round2(
+    Math.max(0, parseMoney(src.monthlyUsd ?? invIn.monthlyUsd ?? agIn.monthlyUsd ?? cl.retainer ?? 0))
+  );
+  const explicitTotal = src.totalUsd !== undefined ? src.totalUsd : invIn.totalUsd;
+  const totalUsd =
+    explicitTotal !== undefined && explicitTotal !== null && explicitTotal !== ''
+      ? round2(Math.max(0, parseMoney(explicitTotal)))
+      : round2(setupUsd + monthlyUsd);
+
+  const agreementDeliverablesSource = Array.isArray(agIn.deliverables)
+    ? agIn.deliverables
+    : Array.isArray(src.agreementDeliverables)
+      ? src.agreementDeliverables
+      : Array.isArray(src.deliverables) && src.deliverables.every((d) => typeof d === 'string')
+        ? src.deliverables
+        : null;
+
+  const agreementDeliverables =
+    agreementDeliverablesSource && agreementDeliverablesSource.length > 0
+      ? agreementDeliverablesSource.map((d) => String(d || '').trim()).filter(Boolean)
+      : [
+          '72 hour interactive staging preview on dedicated demo URL',
+          'Custom high converting website and Growth OS client portal',
+          'Lead capture forms, speed to lead automation, and unified inbox setup',
+          'Local SEO schema, Google Business Profile optimization, and analytics tracking',
+          'Mobile responsive QA and production domain launch',
+        ];
+
+  const portalDeliverablesSource =
+    Array.isArray(src.deliverables) && src.deliverables.some((d) => d && typeof d === 'object')
+      ? src.deliverables
+      : null;
+
+  const defaultDeliverables = portalDeliverablesSource
+    ? portalDeliverablesSource.map((d, idx) => ({
+        id: String(d.id || `del_${idx + 1}`),
+        label: String(d.label || d.title || d.url || 'Deliverable').trim(),
+        url: String(d.url || '').trim(),
+        category: VALID_DELIVERABLE_CATEGORIES.has(d.category) ? d.category : 'asset',
+        addedBy: d.addedBy === 'client' ? 'client' : 'agency',
+        addedAt: d.addedAt || nowIso,
+      }))
+    : cl.customUrl
+      ? [
+          {
+            id: 'del_staging_1',
+            label: `${business} Interactive Staging Preview`,
+            url: String(cl.customUrl).trim(),
+            category: 'staging',
+            addedBy: 'agency',
+            addedAt: nowIso,
+          },
+        ]
+      : [];
+
+  const cleanPrefix = slug.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8) || 'RIVVAK';
+
+  return {
+    agreement: {
+      agreementId: String(agIn.agreementId || src.agreementId || `AGR-${cleanPrefix}-2026`),
+      version: String(agIn.version || '2026.1'),
+      scopeSummary:
+        String(
+          agIn.scopeSummary ??
+            src.scopeSummary ??
+            `Custom website build, 72 hour interactive staging preview, local SEO, and Growth OS automation setup for ${business}.`
+        ).trim(),
+      deliverables: agreementDeliverables,
+      timelineText: String(
+        agIn.timelineText || src.timelineText || '72 hour interactive staging preview, 7 to 14 day production launch'
+      ).trim(),
+      paymentTerms: String(
+        agIn.paymentTerms || src.paymentTerms || buildDefaultPaymentTerms(setupUsd, monthlyUsd)
+      ).trim(),
+      ownershipClause: String(
+        agIn.ownershipClause || '100% client ownership of code, domain, and brand assets with zero lock in.'
+      ).trim(),
+      status: VALID_AGREEMENT_STATUSES.has(agIn.status) ? agIn.status : 'draft',
+      signerName: String(agIn.signerName || ''),
+      signerTitle: String(agIn.signerTitle || ''),
+      signerEmail: String(agIn.signerEmail || email || ''),
+      signedAt: agIn.signedAt || null,
+      signerIp: String(agIn.signerIp || ''),
+      userAgent: String(agIn.userAgent || ''),
+      agreementHash: String(agIn.agreementHash || ''),
+    },
+    shopifyInvoice: {
+      draftOrderId: invIn.draftOrderId ? String(invIn.draftOrderId) : null,
+      orderId: invIn.orderId ? String(invIn.orderId) : null,
+      invoiceNumber: String(invIn.invoiceNumber || ''),
+      invoiceUrl: String(invIn.invoiceUrl || ''),
+      totalUsd,
+      setupUsd,
+      monthlyUsd,
+      currency: String(invIn.currency || 'USD').toUpperCase(),
+      status: VALID_INVOICE_STATUSES.has(invIn.status) ? invIn.status : 'not_created',
+      paymentMethods:
+        Array.isArray(invIn.paymentMethods) && invIn.paymentMethods.length > 0
+          ? invIn.paymentMethods.map((m) => String(m).trim()).filter(Boolean)
+          : DEFAULT_PAYMENT_METHODS.slice(),
+      sentAt: invIn.sentAt || null,
+      paidAt: invIn.paidAt || null,
+      lastSyncedAt: invIn.lastSyncedAt || null,
+      mode: String(invIn.mode || ''),
+    },
+    welcome: {
+      headline: String(welIn.headline || `Welcome to Rivvak Media, ${business}`).trim(),
+      introNote: String(
+        welIn.introNote ||
+          'Your dedicated Project HQ is active. Review and sign your agreement, complete checkout when ready, upload brand assets, and lock in your kickoff strategy call all in one place.'
+      ).trim(),
+      whatHappensNext:
+        Array.isArray(welIn.whatHappensNext) && welIn.whatHappensNext.length > 0
+          ? welIn.whatHappensNext.map((s) => String(s || '').trim()).filter(Boolean)
+          : [
+              'Review and electronically sign your Client Agreement inside Project HQ.',
+              'Complete your Shopify invoice checkout via Shopify Pay, Apple Pay, Google Pay, card, or ACH.',
+              'Upload your logo, brand guidelines, photography, or domain access links in the Assets Hub.',
+              'Attend your 30 minute Kickoff Strategy Call with the Rivvak Media team.',
+              'Review your 72 hour interactive staging preview before full 7 to 14 day production launch.',
+            ],
+      assetChecklist:
+        Array.isArray(welIn.assetChecklist) && welIn.assetChecklist.length > 0
+          ? welIn.assetChecklist.map((s) => String(s || '').trim()).filter(Boolean)
+          : [
+              'Primary logo files (SVG, PNG, or vector source)',
+              'Domain registrar access or preferred domain name',
+              'High resolution photos, team headshots, or project gallery',
+              'Service pricing, promotions, and core offer details',
+              'Google Business Profile and social account links',
+            ],
+      supportEmail: OFFICIAL_SUPPORT_EMAIL,
+      supportPhone: OFFICIAL_SUPPORT_PHONE,
+      sentAt: welIn.sentAt || null,
+      lastEmailMode: String(welIn.lastEmailMode || ''),
+    },
+    strategyCall: {
+      status: VALID_CALL_STATUSES.has(callIn.status) ? callIn.status : 'unscheduled',
+      scheduledIso: callIn.scheduledIso || null,
+      timezone: String(callIn.timezone || 'America/New_York'),
+      durationMin: Number(callIn.durationMin || 30) || 30,
+      platform: VALID_CALL_PLATFORMS.has(callIn.platform) ? callIn.platform : 'Google Meet',
+      meetingUrl: String(callIn.meetingUrl || ''),
+      notes: String(callIn.notes || ''),
+      bookedAt: callIn.bookedAt || null,
+      caldavSynced: Boolean(callIn.caldavSynced),
+    },
+    milestones:
+      Array.isArray(src.milestones) && src.milestones.length > 0
+        ? src.milestones.map((m, idx) => ({
+            id: String(m?.id || `ms_${idx + 1}`),
+            phase: String(m?.phase || 'Phase 1: Discovery & Onboarding'),
+            title: String(m?.title || 'Deliverable'),
+            discovery: normalizeMilestoneStage(m?.discovery, 'Waiting'),
+            build: normalizeMilestoneStage(m?.build, 'Waiting'),
+            review: normalizeMilestoneStage(m?.review, 'Waiting'),
+            live: normalizeMilestoneStage(m?.live, 'Waiting'),
+            updatedAt: m?.updatedAt || nowIso,
+          }))
+        : buildDefaultMilestones(nowIso),
+    deliverables: defaultDeliverables,
+    clientNotes: Array.isArray(src.clientNotes)
+      ? src.clientNotes.map((n, idx) => ({
+          id: String(n?.id || `note_${idx + 1}`),
+          author: String(n?.author || 'Client'),
+          text: String(n?.text || '').trim(),
+          createdAt: n?.createdAt || nowIso,
+        }))
+      : [],
+    launchedAt: src.launchedAt || null,
+    portalUrl: String(src.portalUrl || `https://rivvak.com/pages/client-portal?client=${encodeURIComponent(slug)}`),
+  };
+}
+
+/**
+ * Normalize an existing or partial onboarding record against current defaults.
+ * @param {object} [raw]
+ * @param {object} [client]
+ * @returns {object}
+ */
+function normalizeOnboarding(raw = {}, client = {}) {
+  const input = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  const defaults = createDefaultOnboarding(input, client);
+  const nowIso = new Date().toISOString();
+
+  const rawAg = input.agreement && typeof input.agreement === 'object' ? input.agreement : {};
+  const rawInv = input.shopifyInvoice && typeof input.shopifyInvoice === 'object' ? input.shopifyInvoice : {};
+  const rawWel = input.welcome && typeof input.welcome === 'object' ? input.welcome : {};
+  const rawCall = input.strategyCall && typeof input.strategyCall === 'object' ? input.strategyCall : {};
+
+  const milestones =
+    Array.isArray(input.milestones) && input.milestones.length > 0
+      ? input.milestones.map((m, idx) => ({
+          id: String(m?.id || `ms_${idx + 1}`),
+          phase: String(m?.phase || 'Phase 1: Discovery & Onboarding'),
+          title: String(m?.title || 'Deliverable'),
+          discovery: normalizeMilestoneStage(m?.discovery, 'Waiting'),
+          build: normalizeMilestoneStage(m?.build, 'Waiting'),
+          review: normalizeMilestoneStage(m?.review, 'Waiting'),
+          live: normalizeMilestoneStage(m?.live, 'Waiting'),
+          updatedAt: m?.updatedAt || nowIso,
+        }))
+      : defaults.milestones;
+
+  const deliverables = Array.isArray(input.deliverables)
+    ? input.deliverables
+        .filter((d) => d && typeof d === 'object')
+        .map((d, idx) => ({
+          id: String(d.id || `del_${idx + 1}`),
+          label: String(d.label || d.title || d.url || 'Deliverable').trim(),
+          url: String(d.url || '').trim(),
+          category: VALID_DELIVERABLE_CATEGORIES.has(d.category) ? d.category : 'asset',
+          addedBy: d.addedBy === 'client' ? 'client' : 'agency',
+          addedAt: d.addedAt || nowIso,
+        }))
+    : defaults.deliverables;
+
+  const clientNotes = Array.isArray(input.clientNotes)
+    ? input.clientNotes
+        .filter((n) => n && typeof n === 'object' && String(n.text || '').trim())
+        .map((n, idx) => ({
+          id: String(n.id || `note_${idx + 1}`),
+          author: String(n.author || 'Client').trim(),
+          text: String(n.text || '').trim(),
+          createdAt: n.createdAt || nowIso,
+        }))
+    : defaults.clientNotes;
+
+  return {
+    agreement: {
+      ...defaults.agreement,
+      ...rawAg,
+      version: String(rawAg.version || defaults.agreement.version || '2026.1'),
+      deliverables:
+        Array.isArray(rawAg.deliverables) && rawAg.deliverables.length > 0
+          ? rawAg.deliverables.map((d) => String(d || '').trim()).filter(Boolean)
+          : defaults.agreement.deliverables,
+      status: VALID_AGREEMENT_STATUSES.has(rawAg.status) ? rawAg.status : defaults.agreement.status,
+    },
+    shopifyInvoice: {
+      ...defaults.shopifyInvoice,
+      ...rawInv,
+      draftOrderId: rawInv.draftOrderId ? String(rawInv.draftOrderId) : null,
+      orderId: rawInv.orderId ? String(rawInv.orderId) : null,
+      setupUsd: round2(Math.max(0, parseMoney(rawInv.setupUsd ?? defaults.shopifyInvoice.setupUsd))),
+      monthlyUsd: round2(Math.max(0, parseMoney(rawInv.monthlyUsd ?? defaults.shopifyInvoice.monthlyUsd))),
+      totalUsd: round2(Math.max(0, parseMoney(rawInv.totalUsd ?? defaults.shopifyInvoice.totalUsd))),
+      currency: String(rawInv.currency || defaults.shopifyInvoice.currency || 'USD').toUpperCase(),
+      status: VALID_INVOICE_STATUSES.has(rawInv.status) ? rawInv.status : defaults.shopifyInvoice.status,
+      paymentMethods:
+        Array.isArray(rawInv.paymentMethods) && rawInv.paymentMethods.length > 0
+          ? rawInv.paymentMethods.map((m) => String(m).trim()).filter(Boolean)
+          : DEFAULT_PAYMENT_METHODS.slice(),
+    },
+    welcome: {
+      ...defaults.welcome,
+      ...rawWel,
+      whatHappensNext:
+        Array.isArray(rawWel.whatHappensNext) && rawWel.whatHappensNext.length > 0
+          ? rawWel.whatHappensNext.map((s) => String(s || '').trim()).filter(Boolean)
+          : defaults.welcome.whatHappensNext,
+      assetChecklist:
+        Array.isArray(rawWel.assetChecklist) && rawWel.assetChecklist.length > 0
+          ? rawWel.assetChecklist.map((s) => String(s || '').trim()).filter(Boolean)
+          : defaults.welcome.assetChecklist,
+      supportEmail: OFFICIAL_SUPPORT_EMAIL,
+      supportPhone: OFFICIAL_SUPPORT_PHONE,
+    },
+    strategyCall: {
+      ...defaults.strategyCall,
+      ...rawCall,
+      status: VALID_CALL_STATUSES.has(rawCall.status) ? rawCall.status : defaults.strategyCall.status,
+      durationMin: Number(rawCall.durationMin || defaults.strategyCall.durationMin || 30) || 30,
+      platform: VALID_CALL_PLATFORMS.has(rawCall.platform) ? rawCall.platform : defaults.strategyCall.platform,
+      caldavSynced: Boolean(rawCall.caldavSynced),
+    },
+    milestones,
+    deliverables,
+    clientNotes,
+    launchedAt: input.launchedAt !== undefined ? input.launchedAt : defaults.launchedAt,
+    portalUrl: String(input.portalUrl || defaults.portalUrl),
+  };
+}
+
+/**
+ * Merge partial onboarding updates safely while preserving defaults and enum invariants.
+ * @param {object} existingRaw
+ * @param {object} patchData
+ * @param {object} client
+ * @returns {object}
+ */
+function mergeOnboardingUpdates(existingRaw = {}, patchData = {}, client = {}) {
+  const base = normalizeOnboarding(existingRaw, client);
+  const p = patchData && typeof patchData === 'object' && !Array.isArray(patchData) ? patchData : {};
+  const nowIso = new Date().toISOString();
+
+  const nextAgreement = {
+    ...base.agreement,
+    ...(p.agreement && typeof p.agreement === 'object' ? p.agreement : {}),
+  };
+  if (p.scopeSummary !== undefined) {
+    nextAgreement.scopeSummary = String(p.scopeSummary || '').trim();
+  }
+  if (Array.isArray(p.agreementDeliverables)) {
+    nextAgreement.deliverables = p.agreementDeliverables.map((d) => String(d || '').trim()).filter(Boolean);
+  } else if (Array.isArray(p.deliverables) && p.deliverables.length > 0 && p.deliverables.every((d) => typeof d === 'string')) {
+    nextAgreement.deliverables = p.deliverables.map((d) => String(d || '').trim()).filter(Boolean);
+  }
+
+  const nextInvoice = {
+    ...base.shopifyInvoice,
+    ...(p.shopifyInvoice && typeof p.shopifyInvoice === 'object' ? p.shopifyInvoice : {}),
+  };
+  if (p.setupUsd !== undefined) {
+    nextInvoice.setupUsd = round2(Math.max(0, parseMoney(p.setupUsd)));
+  }
+  if (p.monthlyUsd !== undefined) {
+    nextInvoice.monthlyUsd = round2(Math.max(0, parseMoney(p.monthlyUsd)));
+  }
+  if (p.totalUsd !== undefined) {
+    nextInvoice.totalUsd = round2(Math.max(0, parseMoney(p.totalUsd)));
+  } else if (p.setupUsd !== undefined || p.monthlyUsd !== undefined) {
+    nextInvoice.totalUsd = round2(nextInvoice.setupUsd + nextInvoice.monthlyUsd);
+  }
+  if (
+    p.paymentTerms === undefined &&
+    !(p.agreement && p.agreement.paymentTerms !== undefined) &&
+    (p.setupUsd !== undefined || p.monthlyUsd !== undefined) &&
+    nextAgreement.status !== 'signed'
+  ) {
+    nextAgreement.paymentTerms = buildDefaultPaymentTerms(nextInvoice.setupUsd, nextInvoice.monthlyUsd);
+  }
+
+  const nextWelcome = {
+    ...base.welcome,
+    ...(p.welcome && typeof p.welcome === 'object' ? p.welcome : {}),
+    supportEmail: OFFICIAL_SUPPORT_EMAIL,
+    supportPhone: OFFICIAL_SUPPORT_PHONE,
+  };
+
+  const nextCall = {
+    ...base.strategyCall,
+    ...(p.strategyCall && typeof p.strategyCall === 'object' ? p.strategyCall : {}),
+  };
+
+  let nextMilestones = Array.isArray(p.milestones) ? p.milestones.slice() : base.milestones.slice();
+  if (p.milestoneUpdate && typeof p.milestoneUpdate === 'object') {
+    const upd = p.milestoneUpdate;
+    const idx = nextMilestones.findIndex(
+      (m) => (upd.id && m.id === upd.id) || (upd.title && normText(m.title) === normText(upd.title))
+    );
+    if (idx !== -1) {
+      const cur = { ...nextMilestones[idx] };
+      if (upd.field && VALID_MILESTONE_FIELDS.has(upd.field)) {
+        cur[upd.field] = normalizeMilestoneStage(upd.value, cur[upd.field]);
+      }
+      if (upd.patch && typeof upd.patch === 'object') {
+        for (const f of VALID_MILESTONE_FIELDS) {
+          if (upd.patch[f] !== undefined) cur[f] = normalizeMilestoneStage(upd.patch[f], cur[f]);
+        }
+        if (upd.patch.title !== undefined) cur.title = String(upd.patch.title || cur.title).trim();
+        if (upd.patch.phase !== undefined) cur.phase = String(upd.patch.phase || cur.phase).trim();
+      }
+      cur.updatedAt = nowIso;
+      nextMilestones[idx] = cur;
+    }
+  }
+  if (p.addMilestone && typeof p.addMilestone === 'object' && String(p.addMilestone.title || '').trim()) {
+    nextMilestones.push({
+      id: String(p.addMilestone.id || `ms_${crypto.randomUUID().slice(0, 8)}`),
+      phase: String(p.addMilestone.phase || 'Phase 2: 72 Hour Preview & Core Build').trim(),
+      title: String(p.addMilestone.title).trim(),
+      discovery: normalizeMilestoneStage(p.addMilestone.discovery, 'Waiting'),
+      build: normalizeMilestoneStage(p.addMilestone.build, 'Waiting'),
+      review: normalizeMilestoneStage(p.addMilestone.review, 'Waiting'),
+      live: normalizeMilestoneStage(p.addMilestone.live, 'Waiting'),
+      updatedAt: nowIso,
+    });
+  }
+
+  let nextDeliverables =
+    Array.isArray(p.deliverables) && p.deliverables.some((d) => d && typeof d === 'object')
+      ? p.deliverables.slice()
+      : base.deliverables.slice();
+  if (p.addDeliverable && typeof p.addDeliverable === 'object' && (p.addDeliverable.url || p.addDeliverable.label)) {
+    nextDeliverables.push({
+      id: String(p.addDeliverable.id || `del_${crypto.randomUUID().slice(0, 8)}`),
+      label: String(p.addDeliverable.label || p.addDeliverable.url || 'Deliverable').trim(),
+      url: String(p.addDeliverable.url || '').trim(),
+      category: VALID_DELIVERABLE_CATEGORIES.has(p.addDeliverable.category) ? p.addDeliverable.category : 'asset',
+      addedBy: p.addDeliverable.addedBy === 'client' ? 'client' : 'agency',
+      addedAt: p.addDeliverable.addedAt || nowIso,
+    });
+  }
+
+  let nextNotes = Array.isArray(p.clientNotes) ? p.clientNotes.slice() : base.clientNotes.slice();
+  if (p.addNote) {
+    const noteObj = typeof p.addNote === 'string' ? { text: p.addNote } : p.addNote;
+    if (noteObj && String(noteObj.text || '').trim()) {
+      nextNotes.push({
+        id: String(noteObj.id || `note_${crypto.randomUUID().slice(0, 8)}`),
+        author: String(noteObj.author || 'Rivvak Media').trim(),
+        text: String(noteObj.text).trim(),
+        createdAt: noteObj.createdAt || nowIso,
+      });
+    }
+  }
+
+  return normalizeOnboarding(
+    {
+      agreement: nextAgreement,
+      shopifyInvoice: nextInvoice,
+      welcome: nextWelcome,
+      strategyCall: nextCall,
+      milestones: nextMilestones,
+      deliverables: nextDeliverables,
+      clientNotes: nextNotes,
+      launchedAt: p.launchedAt !== undefined ? p.launchedAt : base.launchedAt,
+      portalUrl: p.portalUrl !== undefined ? p.portalUrl : base.portalUrl,
+    },
+    client
+  );
+}
+
+/**
+ * Mark a named onboarding milestone row as Done (e.g., Agreement or Strategy Call).
+ * @param {object} onboarding
+ * @param {{ id?: string, titlePattern?: RegExp }} matcher
+ * @param {string} [timestamp]
+ */
+function markOnboardingMilestoneDone(onboarding, matcher = {}, timestamp = new Date().toISOString()) {
+  if (!onboarding || !Array.isArray(onboarding.milestones)) return;
+  const row = onboarding.milestones.find(
+    (m) =>
+      (matcher.id && m.id === matcher.id) ||
+      (matcher.titlePattern && matcher.titlePattern.test(String(m.title || '')))
+  );
+  if (!row) return;
+  row.discovery = 'Done';
+  for (const f of ['build', 'review', 'live']) {
+    if (row[f] && row[f] !== 'N/A') {
+      row[f] = 'Done';
+    }
+  }
+  row.updatedAt = timestamp;
 }
 
 /**
@@ -1110,6 +1718,12 @@ function normalizeStoreShape(parsed, env = process.env) {
     for (const [slug, defClient] of Object.entries(defaults.clients)) {
       if (!parsed.clients[slug]) {
         parsed.clients[slug] = defClient;
+      }
+    }
+    for (const [slug, client] of Object.entries(parsed.clients)) {
+      if (client && typeof client === 'object' && !Array.isArray(client)) {
+        if (!client.slug) client.slug = slug;
+        client.onboarding = normalizeOnboarding(client.onboarding, client);
       }
     }
   }
@@ -2233,6 +2847,321 @@ async function fetchLiveShopifyFinances({ env = process.env, refresh = false, fe
   };
   cache.set(finCacheKey, { value: payload, expiresAt: Date.now() + SHOPIFY_FINANCES_CACHE_TTL_MS });
   return payload;
+}
+
+const shopifyDefaultTokenCache = new Map();
+
+/**
+ * Call a Shopify Admin REST endpoint with OAuth token caching and single 401 refresh retry.
+ * @param {object} env
+ * @param {{ method?: string, apiPath: string, body?: any, fetchImpl?: Function, cache?: Map }} opts
+ * @returns {Promise<object>}
+ */
+async function callShopifyAdminApi(env = process.env, opts = {}) {
+  const fetchImpl = opts.fetchImpl || globalThis.fetch;
+  const cache = opts.cache || shopifyDefaultTokenCache;
+  const auth = await getShopifyAdminAccessToken({ env, fetchImpl, cache, forceRefresh: false });
+  if (!auth.ok) {
+    return { ok: false, missingCredentials: true, missingKeys: auth.missingKeys, auth };
+  }
+
+  const runReq = async (tok) => {
+    const endpoint = `https://${auth.shopDomain}/admin/api/${auth.apiVersion}${opts.apiPath}`;
+    const reqInit = {
+      method: opts.method || 'GET',
+      headers: {
+        'X-Shopify-Access-Token': tok,
+        Accept: 'application/json',
+        ...(opts.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+      },
+      ...(opts.body !== undefined ? { body: JSON.stringify(opts.body) } : {}),
+    };
+    const resp = await fetchImpl(endpoint, reqInit);
+    const json = await resp.json().catch(() => ({}));
+    return { resp, json };
+  };
+
+  let attempt = await runReq(auth.token);
+  if (attempt.resp.status === 401 && auth.source !== 'static_token') {
+    const refreshed = await getShopifyAdminAccessToken({ env, fetchImpl, cache, forceRefresh: true });
+    if (refreshed.ok && refreshed.token) {
+      attempt = await runReq(refreshed.token);
+    }
+  }
+
+  return {
+    ok: attempt.resp.ok,
+    status: attempt.resp.status,
+    data: attempt.json,
+    auth,
+  };
+}
+
+/**
+ * Create a Shopify Draft Order invoice (API 2026-01) and optionally send invoice email.
+ * Returns honest dry_run fallback when dryRun is true or Shopify OAuth credentials are missing.
+ * @param {object} env
+ * @param {object} [opts]
+ * @returns {Promise<object>}
+ */
+async function createShopifyDraftOrderInvoice(env = process.env, opts = {}) {
+  const setupUsd = round2(Math.max(0, parseMoney(opts.setupUsd)));
+  const monthlyUsd = round2(Math.max(0, parseMoney(opts.monthlyUsd)));
+  const totalUsd =
+    opts.totalUsd !== undefined && opts.totalUsd !== null && opts.totalUsd !== ''
+      ? round2(Math.max(0, parseMoney(opts.totalUsd)))
+      : round2(setupUsd + monthlyUsd);
+
+  if (opts.dryRun === true) {
+    return {
+      ok: true,
+      mode: 'dry_run',
+      draftOrderId: null,
+      orderId: null,
+      invoiceNumber: '',
+      invoiceUrl: 'https://rivvak.com/pages/pricing',
+      status: 'open',
+      setupUsd,
+      monthlyUsd,
+      totalUsd,
+      currency: 'USD',
+    };
+  }
+
+  const business = String(opts.business || opts.slug || 'Client').trim();
+  const slug = String(opts.slug || '').trim();
+  const email = String(opts.email || '').trim();
+  const scopeSummary = String(opts.scopeSummary || opts.note || '').trim();
+
+  const lineItems = Array.isArray(opts.lineItems) && opts.lineItems.length > 0 ? opts.lineItems : [];
+  if (lineItems.length === 0) {
+    if (setupUsd > 0) {
+      lineItems.push({
+        title: `Rivvak Media Project Setup (${business})`,
+        price: setupUsd.toFixed(2),
+        quantity: 1,
+        taxable: false,
+      });
+    }
+    if (monthlyUsd > 0) {
+      lineItems.push({
+        title: `Rivvak Growth OS Monthly Retainer (${business})`,
+        price: monthlyUsd.toFixed(2),
+        quantity: 1,
+        taxable: false,
+      });
+    }
+    if (lineItems.length === 0) {
+      lineItems.push({
+        title: `Rivvak Media Project Investment (${business})`,
+        price: totalUsd.toFixed(2),
+        quantity: 1,
+        taxable: false,
+      });
+    }
+  }
+
+  try {
+    const createPayload = {
+      draft_order: {
+        line_items: lineItems,
+        ...(email ? { email } : {}),
+        note: `Rivvak Media Onboarding${slug ? ` (${slug})` : ''}${scopeSummary ? ` | ${scopeSummary}` : ''}`.slice(0, 500),
+        tags: `rivvak-onboarding${slug ? `, client-${slug}` : ''}`,
+        use_customer_default_address: true,
+      },
+    };
+
+    const res = await callShopifyAdminApi(env, {
+      method: 'POST',
+      apiPath: '/draft_orders.json',
+      body: createPayload,
+      fetchImpl: opts.fetchImpl,
+      cache: opts.cache,
+    });
+
+    if (res.missingCredentials) {
+      return {
+        ok: true,
+        mode: 'dry_run',
+        reason: 'missing_credentials',
+        missingKeys: res.missingKeys,
+        draftOrderId: null,
+        orderId: null,
+        invoiceNumber: '',
+        invoiceUrl: 'https://rivvak.com/pages/pricing',
+        status: 'open',
+        setupUsd,
+        monthlyUsd,
+        totalUsd,
+        currency: 'USD',
+      };
+    }
+
+    if (!res.ok || !res.data?.draft_order) {
+      const errMsg = res.data?.errors
+        ? typeof res.data.errors === 'string'
+          ? res.data.errors
+          : JSON.stringify(res.data.errors)
+        : `Shopify Draft Order create failed (HTTP ${res.status || 502})`;
+      return {
+        ok: false,
+        statusCode: res.status && res.status >= 400 ? 502 : 502,
+        mode: 'shopify_error',
+        error: errMsg,
+      };
+    }
+
+    const d = res.data.draft_order;
+    const draftOrderId = d.id != null ? String(d.id) : null;
+    let invoiceSent = false;
+    let invoiceEmailError = '';
+    let sentAt = null;
+
+    if (opts.sendInvoiceEmail === true && draftOrderId) {
+      const sendRes = await callShopifyAdminApi(env, {
+        method: 'POST',
+        apiPath: `/draft_orders/${encodeURIComponent(draftOrderId)}/send_invoice.json`,
+        body: {
+          draft_order_invoice: {
+            ...(email ? { to: email } : {}),
+            subject: `Your Rivvak Media Invoice ${d.name || ''}`.trim(),
+            custom_message: `Review your invoice and complete checkout via Shopify. Support: ${OFFICIAL_SUPPORT_EMAIL} or ${OFFICIAL_SUPPORT_PHONE}.`,
+          },
+        },
+        fetchImpl: opts.fetchImpl,
+        cache: opts.cache,
+      });
+      if (sendRes.ok) {
+        invoiceSent = true;
+        sentAt = new Date().toISOString();
+      } else {
+        invoiceEmailError = sendRes.data?.errors
+          ? JSON.stringify(sendRes.data.errors)
+          : `Shopify send_invoice HTTP ${sendRes.status || 502}`;
+      }
+    }
+
+    const rawStatus = String(d.status || 'open').toLowerCase().trim();
+    const orderId = d.order_id != null ? String(d.order_id) : null;
+    const normalizedStatus =
+      rawStatus === 'completed' || orderId
+        ? 'paid'
+        : invoiceSent
+          ? 'invoice_sent'
+          : VALID_INVOICE_STATUSES.has(rawStatus)
+            ? rawStatus
+            : 'open';
+
+    return {
+      ok: true,
+      mode: 'live_shopify',
+      draftOrderId,
+      orderId,
+      invoiceNumber: d.name || (draftOrderId ? `#D${draftOrderId}` : ''),
+      invoiceUrl: d.invoice_url || 'https://rivvak.com/pages/pricing',
+      status: normalizedStatus,
+      totalUsd: d.total_price != null ? round2(parseMoney(d.total_price)) : totalUsd,
+      setupUsd,
+      monthlyUsd,
+      currency: String(d.currency || 'USD').toUpperCase(),
+      sentAt,
+      invoiceEmailSent: invoiceSent,
+      ...(invoiceEmailError ? { invoiceEmailError } : {}),
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      statusCode: 502,
+      mode: 'shopify_error',
+      error: err.message || 'Shopify Draft Order request failed',
+    };
+  }
+}
+
+/**
+ * Fetch current Shopify Draft Order status (API 2026-01).
+ * Returns dry_run when dryRun is true, draftOrderId is missing, or OAuth credentials are absent.
+ * @param {object} env
+ * @param {string|number|null} draftOrderId
+ * @param {object} [opts]
+ * @returns {Promise<object>}
+ */
+async function fetchShopifyDraftOrderStatus(env = process.env, draftOrderId, opts = {}) {
+  const idStr = draftOrderId ? String(draftOrderId).trim() : '';
+  if (opts.dryRun === true || !idStr) {
+    return {
+      ok: true,
+      mode: 'dry_run',
+      draftOrderId: idStr || null,
+      orderId: null,
+      status: opts.currentStatus || (idStr ? 'open' : 'not_created'),
+      paid: opts.currentStatus === 'paid',
+      invoiceUrl: opts.invoiceUrl || (idStr ? 'https://rivvak.com/pages/pricing' : ''),
+    };
+  }
+
+  try {
+    const res = await callShopifyAdminApi(env, {
+      method: 'GET',
+      apiPath: `/draft_orders/${encodeURIComponent(idStr)}.json`,
+      fetchImpl: opts.fetchImpl,
+      cache: opts.cache,
+    });
+
+    if (res.missingCredentials) {
+      return {
+        ok: true,
+        mode: 'dry_run',
+        reason: 'missing_credentials',
+        missingKeys: res.missingKeys,
+        draftOrderId: idStr,
+        orderId: null,
+        status: opts.currentStatus || 'open',
+        paid: opts.currentStatus === 'paid',
+      };
+    }
+
+    if (!res.ok || !res.data?.draft_order) {
+      const errMsg = res.data?.errors
+        ? JSON.stringify(res.data.errors)
+        : `Shopify Draft Order lookup failed (HTTP ${res.status || 502})`;
+      return {
+        ok: false,
+        statusCode: 502,
+        mode: 'shopify_error',
+        error: errMsg,
+      };
+    }
+
+    const d = res.data.draft_order;
+    const rawStatus = String(d.status || 'open').toLowerCase().trim();
+    const orderId = d.order_id != null ? String(d.order_id) : null;
+    const paid = rawStatus === 'completed' || Boolean(orderId);
+    const status = paid ? 'paid' : VALID_INVOICE_STATUSES.has(rawStatus) ? rawStatus : 'open';
+
+    return {
+      ok: true,
+      mode: 'live_shopify',
+      draftOrderId: d.id != null ? String(d.id) : idStr,
+      orderId,
+      invoiceNumber: d.name || '',
+      invoiceUrl: d.invoice_url || opts.invoiceUrl || '',
+      rawStatus,
+      status,
+      paid,
+      completedAt: d.completed_at || null,
+      totalUsd: d.total_price != null ? round2(parseMoney(d.total_price)) : undefined,
+      currency: String(d.currency || 'USD').toUpperCase(),
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      statusCode: 502,
+      mode: 'shopify_error',
+      error: err.message || 'Shopify Draft Order sync failed',
+    };
+  }
 }
 
 function maskSecretTail(val) {
@@ -4278,6 +5207,144 @@ async function sendTransactionalEmail({ to, subject, text, html, from, replyTo }
 }
 
 /**
+ * Build standard and magic login portal URLs for a client slug and access code.
+ * @param {string} slug
+ * @param {string} [accessCode]
+ * @returns {{ portalUrl: string, portalMagicUrl: string }}
+ */
+function buildClientPortalUrls(slug, accessCode = '') {
+  const safeSlug = encodeURIComponent(String(slug || '').trim());
+  const portalUrl = `https://rivvak.com/pages/client-portal?client=${safeSlug}`;
+  const portalMagicUrl = accessCode
+    ? `${portalUrl}&code=${encodeURIComponent(String(accessCode).trim())}`
+    : portalUrl;
+  return { portalUrl, portalMagicUrl };
+}
+
+/**
+ * Strip any em-dashes or en-dashes so transactional onboarding copy remains clean ASCII punctuation.
+ * @param {string} text
+ * @returns {string}
+ */
+function stripFancyDashes(text) {
+  return String(text || '').replace(/[\u2013\u2014]/g, ', ');
+}
+
+/**
+ * Build First-Hour Welcome + Agreement + Shopify Checkout + Portal Magic Link email payload.
+ * Uses official Rivvak Media contact details ONLY (connect@rivvak.com and (728) 231-6974).
+ * @param {{ client: object, portalUrl: string, portalMagicUrl: string }} params
+ * @returns {{ subject: string, text: string, html: string }}
+ */
+function buildFirstHourWelcomeEmail({ client, portalUrl, portalMagicUrl }) {
+  const ob = normalizeOnboarding(client.onboarding, client);
+  const greetingName = String(client.owner || client.business || 'there').trim();
+  const business = String(client.business || client.slug || 'Your Business').trim();
+  const invoiceUrl = ob.shopifyInvoice.invoiceUrl || portalMagicUrl;
+  const setupStr = `$${ob.shopifyInvoice.setupUsd.toLocaleString('en-US')}`;
+  const monthlyStr = `$${ob.shopifyInvoice.monthlyUsd.toLocaleString('en-US')}/mo`;
+  const totalStr = `$${ob.shopifyInvoice.totalUsd.toLocaleString('en-US')} ${ob.shopifyInvoice.currency}`;
+
+  const stepsBlock = ob.welcome.whatHappensNext.map((step, i) => `${i + 1}. ${step}`).join('\n');
+  const checklistBlock = ob.welcome.assetChecklist.map((item) => `- ${item}`).join('\n');
+
+  const subject = stripFancyDashes(`Welcome to Rivvak Media, ${business}: Your Project HQ & First Steps`);
+  const text = stripFancyDashes(
+    [
+      `Hi ${greetingName},`,
+      '',
+      ob.welcome.headline,
+      ob.welcome.introNote,
+      '',
+      '1) OPEN YOUR CLIENT PORTAL HQ (1 CLICK MAGIC LINK)',
+      `Portal Magic Link: ${portalMagicUrl}`,
+      `Direct Portal URL: ${portalUrl}`,
+      '',
+      '2) CLIENT AGREEMENT & SCOPE SUMMARY',
+      `Agreement ID: ${ob.agreement.agreementId} (Version ${ob.agreement.version})`,
+      `Scope: ${ob.agreement.scopeSummary}`,
+      `Timeline: ${ob.agreement.timelineText}`,
+      `Ownership: ${ob.agreement.ownershipClause}`,
+      `Review and sign directly inside Project HQ: ${portalMagicUrl}`,
+      '',
+      '3) SHOPIFY CHECKOUT INVOICE',
+      `Setup Investment: ${setupStr}`,
+      `Monthly Growth OS Retainer: ${monthlyStr}`,
+      `Total Due: ${totalStr}`,
+      `Accepted Methods: ${ob.shopifyInvoice.paymentMethods.join(', ')}`,
+      `Pay via Shopify Checkout: ${invoiceUrl}`,
+      '',
+      '4) WHAT HAPPENS NEXT',
+      stepsBlock,
+      '',
+      '5) BRAND ASSET CHECKLIST (UPLOAD IN PROJECT HQ)',
+      checklistBlock,
+      '',
+      'Need anything before our kickoff strategy call? Reach our team anytime:',
+      `Email: ${OFFICIAL_SUPPORT_EMAIL}`,
+      `Phone: ${OFFICIAL_SUPPORT_PHONE}`,
+      '',
+      'Rivvak Media',
+      'https://rivvak.com/',
+    ].join('\n')
+  );
+
+  const html = stripFancyDashes(
+    `<div style="font-family:Arial,sans-serif;color:#111827;line-height:1.6;max-width:640px;margin:0 auto;">` +
+      `<h2 style="margin:0 0 12px;">${escapeHtml(ob.welcome.headline)}</h2>` +
+      `<p>Hi ${escapeHtml(greetingName)},</p>` +
+      `<p>${escapeHtml(ob.welcome.introNote)}</p>` +
+      `<p><a href="${escapeHtml(portalMagicUrl)}" style="display:inline-block;padding:12px 20px;background:#111827;color:#ffffff;text-decoration:none;border-radius:6px;font-weight:bold;">Open Project HQ</a></p>` +
+      `<p><strong>Agreement (${escapeHtml(ob.agreement.agreementId)}):</strong> ${escapeHtml(ob.agreement.scopeSummary)}<br/>` +
+      `<strong>Timeline:</strong> ${escapeHtml(ob.agreement.timelineText)}<br/>` +
+      `<strong>Ownership:</strong> ${escapeHtml(ob.agreement.ownershipClause)}</p>` +
+      `<p><strong>Shopify Checkout (${escapeHtml(totalStr)}):</strong> ` +
+      `Setup ${escapeHtml(setupStr)}, Monthly ${escapeHtml(monthlyStr)}<br/>` +
+      `<a href="${escapeHtml(invoiceUrl)}">${escapeHtml(invoiceUrl)}</a></p>` +
+      `<p><strong>What Happens Next:</strong></p>` +
+      `<ol>${ob.welcome.whatHappensNext.map((s) => `<li>${escapeHtml(s)}</li>`).join('')}</ol>` +
+      `<p><strong>Asset Checklist:</strong></p>` +
+      `<ul>${ob.welcome.assetChecklist.map((s) => `<li>${escapeHtml(s)}</li>`).join('')}</ul>` +
+      `<hr style="border:none;border-top:1px solid #e5e7eb;margin:20px 0;"/>` +
+      `<p style="font-size:13px;color:#4b5563;">Rivvak Media Support: ${escapeHtml(OFFICIAL_SUPPORT_EMAIL)} | ${escapeHtml(OFFICIAL_SUPPORT_PHONE)}</p>` +
+      `</div>`
+  );
+
+  return { subject, text, html };
+}
+
+/**
+ * Dispatch an onboarding email respecting dryRun or unconfigured email providers cleanly.
+ * @param {{ to: string, subject: string, text: string, html?: string, replyTo?: string, dryRun?: boolean }} msg
+ * @param {{ env?: object, fetchImpl?: Function, smtpSendImpl?: Function }} ctx
+ * @returns {Promise<object>}
+ */
+async function dispatchOnboardingEmail(msg, ctx = {}) {
+  const env = ctx.env || process.env;
+  if (msg.dryRun === true || !isLiveEmailConfigured(env)) {
+    return {
+      ok: true,
+      statusCode: 200,
+      mode: 'dry_run',
+      dryRun: true,
+      to: msg.to,
+      subject: msg.subject,
+    };
+  }
+  return sendTransactionalEmail(
+    {
+      to: msg.to,
+      subject: stripFancyDashes(msg.subject),
+      text: stripFancyDashes(msg.text),
+      html: msg.html ? stripFancyDashes(msg.html) : undefined,
+      from: env.RESEND_FROM || env.SMTP_FROM || env.SMTP_USER || `Rivvak Media <${OFFICIAL_SUPPORT_EMAIL}>`,
+      replyTo: msg.replyTo || OFFICIAL_SUPPORT_EMAIL,
+    },
+    ctx
+  );
+}
+
+/**
  * Decode RFC-2047 encoded-word MIME headers (=?UTF-8?B?...?= and =?UTF-8?Q?...?=).
  * @param {string} value
  * @returns {string}
@@ -6094,12 +7161,14 @@ function createServer(options = {}) {
             for (const [slug, incoming] of Object.entries(data.clients)) {
               const prev = store.clients[slug] || {};
               const preservedStripe = mergePreservedStripeConfig(prev.stripeConfig, incoming.stripeConfig);
-              store.clients[slug] = {
+              const nextClient = {
                 ...prev,
                 ...incoming,
                 slug,
                 ...(preservedStripe ? { stripeConfig: preservedStripe } : {}),
               };
+              nextClient.onboarding = normalizeOnboarding(nextClient.onboarding, nextClient);
+              store.clients[slug] = nextClient;
             }
           }
           await saveStore(storePath, store, env);
@@ -6153,9 +7222,180 @@ function createServer(options = {}) {
             outboundQueue: [],
             processedScheduleKeys: {},
           };
+          created.onboarding = normalizeOnboarding(
+            data.onboarding ? data.onboarding : createDefaultOnboarding(data, created),
+            created
+          );
           store.clients[slug] = created;
           await saveStore(storePath, store, env);
-          sendJson(res, 201, { ok: true, slug, client: created });
+          sendJson(res, 201, { ok: true, slug, client: sanitizeClientForResponse(created) });
+          return;
+        }
+
+        if (method === 'POST' && pathname === '/api/admin/clients/onboard') {
+          const { data } = await readRequestBody(req);
+          const slug = String(data.slug || data.business || '')
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, '-')
+            .replace(/^-|-$/g, '');
+          if (!slug) {
+            sendJson(res, 400, { ok: false, error: 'Client business or slug is required' });
+            return;
+          }
+
+          const nowIso = new Date().toISOString();
+          const existing = store.clients[slug] || null;
+          const isNew = !existing;
+          const codePrefix = slug.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8) || 'RIVVAK';
+          const generatedCode = `${codePrefix}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`;
+
+          let client;
+          if (existing) {
+            const preservedStripe = mergePreservedStripeConfig(existing.stripeConfig, data.stripeConfig);
+            client = {
+              ...existing,
+              ...(data.business !== undefined ? { business: String(data.business || existing.business).trim() } : {}),
+              ...(data.owner !== undefined || data.contactName !== undefined || data.name !== undefined
+                ? { owner: String(data.owner ?? data.contactName ?? data.name ?? existing.owner ?? '').trim() }
+                : {}),
+              ...(data.phone !== undefined ? { phone: String(data.phone || '').trim() } : {}),
+              ...(data.email !== undefined ? { email: String(data.email || '').trim() } : {}),
+              ...(data.location !== undefined ? { location: String(data.location || '').trim() } : {}),
+              ...(data.customUrl !== undefined ? { customUrl: String(data.customUrl || '').trim() } : {}),
+              ...(Array.isArray(data.assignedDemos) ? { assignedDemos: data.assignedDemos } : {}),
+              accessCode: data.accessCode ? String(data.accessCode).trim() : existing.accessCode || generatedCode,
+              slug,
+              ...(preservedStripe ? { stripeConfig: preservedStripe } : {}),
+            };
+            client.onboarding = mergeOnboardingUpdates(existing.onboarding, data, client);
+          } else {
+            client = {
+              slug,
+              id: data.id || `c_${slug.replace(/-/g, '_')}`,
+              business: String(data.business || slug).trim(),
+              owner: String(data.owner ?? data.contactName ?? data.name ?? '').trim(),
+              phone: String(data.phone || '').trim(),
+              email: String(data.email || '').trim(),
+              location: String(data.location || '').trim(),
+              accessCode: data.accessCode ? String(data.accessCode).trim() : generatedCode,
+              assignedDemos: Array.isArray(data.assignedDemos) ? data.assignedDemos : [],
+              customUrl: String(data.customUrl || '').trim(),
+              webhookUrl: String(data.webhookUrl || '').trim(),
+              twilioNumber: String(data.twilioNumber || '').trim(),
+              igUserId: String(data.igUserId || '').trim(),
+              modules: data.modules || createDefaultStore(env).clients['clean-results'].modules,
+              campaigns: Array.isArray(data.campaigns) ? data.campaigns : [],
+              leadSources: Array.isArray(data.leadSources) ? data.leadSources : [],
+              bookings: Array.isArray(data.bookings) ? data.bookings : [],
+              workflows: Array.isArray(data.workflows) ? data.workflows : [],
+              contacts: Array.isArray(data.contacts) ? data.contacts : [],
+              inboxThreads: Array.isArray(data.inboxThreads) ? data.inboxThreads : [],
+              opportunities: Array.isArray(data.opportunities) ? data.opportunities : [],
+              marketing: data.marketing || { mediaAssets: [], scheduledPosts: [], brandBoard: {}, templates: [] },
+              executionLogs: [],
+              outboundQueue: [],
+              processedScheduleKeys: {},
+            };
+            client.onboarding = normalizeOnboarding(createDefaultOnboarding(data, client), client);
+          }
+
+          if (client.onboarding.shopifyInvoice.monthlyUsd > 0) {
+            client.retainer = client.onboarding.shopifyInvoice.monthlyUsd;
+          }
+
+          const { portalUrl, portalMagicUrl } = buildClientPortalUrls(slug, client.accessCode);
+          if (!data.portalUrl) {
+            client.onboarding.portalUrl = portalUrl;
+          }
+
+          if (data.createShopifyInvoice === true) {
+            const invRes = await createShopifyDraftOrderInvoice(env, {
+              business: client.business,
+              owner: client.owner,
+              email: client.email,
+              phone: client.phone,
+              slug,
+              setupUsd: client.onboarding.shopifyInvoice.setupUsd,
+              monthlyUsd: client.onboarding.shopifyInvoice.monthlyUsd,
+              totalUsd: client.onboarding.shopifyInvoice.totalUsd,
+              scopeSummary: client.onboarding.agreement.scopeSummary,
+              lineItems: Array.isArray(data.lineItems) ? data.lineItems : undefined,
+              sendInvoiceEmail: Boolean(data.sendInvoiceEmail),
+              dryRun: Boolean(data.dryRun),
+              fetchImpl,
+              cache: analyticsCache,
+            });
+            if (invRes.ok) {
+              client.onboarding.shopifyInvoice = normalizeOnboarding(
+                {
+                  ...client.onboarding,
+                  shopifyInvoice: {
+                    ...client.onboarding.shopifyInvoice,
+                    draftOrderId: invRes.draftOrderId ?? client.onboarding.shopifyInvoice.draftOrderId,
+                    orderId: invRes.orderId ?? client.onboarding.shopifyInvoice.orderId,
+                    invoiceNumber: invRes.invoiceNumber || client.onboarding.shopifyInvoice.invoiceNumber,
+                    invoiceUrl: invRes.invoiceUrl || client.onboarding.shopifyInvoice.invoiceUrl,
+                    status: invRes.status || 'open',
+                    mode: invRes.mode,
+                    sentAt: invRes.sentAt || client.onboarding.shopifyInvoice.sentAt,
+                    lastSyncedAt: nowIso,
+                  },
+                },
+                client
+              ).shopifyInvoice;
+            } else {
+              client.onboarding.shopifyInvoice.mode = invRes.mode || 'shopify_error';
+              client.onboarding.shopifyInvoice.lastSyncedAt = nowIso;
+            }
+          }
+
+          let welcomeEmail = null;
+          if (data.sendWelcomeEmail === true) {
+            const targetEmail = String(data.welcomeEmailTo || client.email || '').trim();
+            if (targetEmail) {
+              const mailPayload = buildFirstHourWelcomeEmail({
+                client,
+                portalUrl: client.onboarding.portalUrl,
+                portalMagicUrl,
+              });
+              welcomeEmail = await dispatchOnboardingEmail(
+                {
+                  to: targetEmail,
+                  ...mailPayload,
+                  dryRun: Boolean(data.dryRun),
+                },
+                { env, fetchImpl, smtpSendImpl }
+              );
+              if (welcomeEmail.ok) {
+                client.onboarding.welcome.sentAt = nowIso;
+                client.onboarding.welcome.lastEmailMode = welcomeEmail.mode;
+                if (client.onboarding.agreement.status === 'draft') {
+                  client.onboarding.agreement.status = 'sent';
+                }
+              }
+            } else {
+              welcomeEmail = {
+                ok: false,
+                skipped: true,
+                mode: 'missing_recipient_email',
+                error: 'Client email is required to send welcome email',
+              };
+            }
+          }
+
+          store.clients[slug] = client;
+          await saveStore(storePath, store, env);
+          sendJson(res, isNew ? 201 : 200, {
+            ok: true,
+            isNew,
+            slug,
+            accessCode: client.accessCode,
+            portalMagicUrl,
+            portalUrl: client.onboarding.portalUrl,
+            shopifyInvoice: client.onboarding.shopifyInvoice,
+            welcomeEmail,
+            client: sanitizeClientForResponse(client),
+          });
           return;
         }
 
@@ -6345,6 +7585,208 @@ function createServer(options = {}) {
           return;
         }
 
+        const adminOnboardingMatch = pathname.match(/^\/api\/admin\/clients\/([a-z0-9-]+)\/onboarding(?:\/([a-z0-9-]+))?$/i);
+        if (adminOnboardingMatch) {
+          const slug = adminOnboardingMatch[1];
+          const subAction = (adminOnboardingMatch[2] || '').toLowerCase();
+          const client = store.clients[slug];
+          if (!client) {
+            sendJson(res, 404, { ok: false, error: `Client "${slug}" not found` });
+            return;
+          }
+          client.onboarding = normalizeOnboarding(client.onboarding, client);
+
+          if (method === 'PATCH' && subAction === '') {
+            const { data } = await readRequestBody(req);
+            client.onboarding = mergeOnboardingUpdates(client.onboarding, data, client);
+            if (client.onboarding.shopifyInvoice.monthlyUsd > 0) {
+              client.retainer = client.onboarding.shopifyInvoice.monthlyUsd;
+            }
+            await saveStore(storePath, store, env);
+            sendJson(res, 200, {
+              ok: true,
+              slug,
+              onboarding: client.onboarding,
+              client: sanitizeClientForResponse(client),
+            });
+            return;
+          }
+
+          if (method === 'POST' && subAction === 'shopify-invoice') {
+            const { data } = await readRequestBody(req);
+            const ob = client.onboarding;
+            const setupUsd =
+              data.setupUsd !== undefined ? round2(Math.max(0, parseMoney(data.setupUsd))) : ob.shopifyInvoice.setupUsd;
+            const monthlyUsd =
+              data.monthlyUsd !== undefined
+                ? round2(Math.max(0, parseMoney(data.monthlyUsd)))
+                : ob.shopifyInvoice.monthlyUsd;
+            const totalUsd =
+              data.totalUsd !== undefined
+                ? round2(Math.max(0, parseMoney(data.totalUsd)))
+                : round2(setupUsd + monthlyUsd) || ob.shopifyInvoice.totalUsd;
+
+            const invRes = await createShopifyDraftOrderInvoice(env, {
+              business: client.business,
+              owner: client.owner,
+              email: data.email || client.email,
+              phone: client.phone,
+              slug,
+              setupUsd,
+              monthlyUsd,
+              totalUsd,
+              scopeSummary: data.scopeSummary || ob.agreement.scopeSummary,
+              lineItems: Array.isArray(data.lineItems) ? data.lineItems : undefined,
+              sendInvoiceEmail: Boolean(data.sendInvoiceEmail),
+              dryRun: Boolean(data.dryRun),
+              fetchImpl,
+              cache: analyticsCache,
+            });
+            if (!invRes.ok) {
+              sendJson(res, invRes.statusCode || 502, {
+                ok: false,
+                mode: invRes.mode || 'shopify_error',
+                error: invRes.error || 'Failed to create Shopify Draft Order invoice',
+              });
+              return;
+            }
+            const nowIso = new Date().toISOString();
+            client.onboarding = mergeOnboardingUpdates(
+              ob,
+              {
+                setupUsd,
+                monthlyUsd,
+                totalUsd,
+                shopifyInvoice: {
+                  draftOrderId: invRes.draftOrderId ?? null,
+                  orderId: invRes.orderId ?? null,
+                  invoiceNumber: invRes.invoiceNumber || ob.shopifyInvoice.invoiceNumber,
+                  invoiceUrl: invRes.invoiceUrl || ob.shopifyInvoice.invoiceUrl,
+                  status: invRes.status || 'open',
+                  mode: invRes.mode,
+                  sentAt: invRes.sentAt || ob.shopifyInvoice.sentAt,
+                  lastSyncedAt: nowIso,
+                },
+              },
+              client
+            );
+            await saveStore(storePath, store, env);
+            sendJson(res, 200, {
+              ok: true,
+              slug,
+              shopifyInvoice: client.onboarding.shopifyInvoice,
+              client: sanitizeClientForResponse(client),
+            });
+            return;
+          }
+
+          if (method === 'POST' && subAction === 'sync-payment') {
+            const { data } = await readRequestBody(req);
+            const inv = client.onboarding.shopifyInvoice;
+            const syncRes = await fetchShopifyDraftOrderStatus(env, inv.draftOrderId, {
+              dryRun: Boolean(data.dryRun),
+              currentStatus: inv.status,
+              invoiceUrl: inv.invoiceUrl,
+              fetchImpl,
+              cache: analyticsCache,
+            });
+            if (!syncRes.ok) {
+              sendJson(res, syncRes.statusCode || 502, {
+                ok: false,
+                mode: syncRes.mode || 'shopify_error',
+                error: syncRes.error || 'Failed to sync Shopify Draft Order status',
+              });
+              return;
+            }
+            const nowIso = new Date().toISOString();
+            inv.lastSyncedAt = nowIso;
+            inv.mode = syncRes.mode;
+            if (syncRes.invoiceUrl) inv.invoiceUrl = syncRes.invoiceUrl;
+            if (syncRes.invoiceNumber) inv.invoiceNumber = syncRes.invoiceNumber;
+            if (syncRes.paid || syncRes.status === 'paid' || syncRes.rawStatus === 'completed' || syncRes.orderId) {
+              inv.status = 'paid';
+              if (syncRes.orderId) inv.orderId = syncRes.orderId;
+              inv.paidAt = inv.paidAt || syncRes.completedAt || nowIso;
+              markOnboardingMilestoneDone(
+                client.onboarding,
+                { id: 'ms_p1_invoice', titlePattern: /shopify\s*invoice/i },
+                nowIso
+              );
+            } else if (syncRes.status && VALID_INVOICE_STATUSES.has(syncRes.status)) {
+              inv.status = syncRes.status;
+            }
+            await saveStore(storePath, store, env);
+            sendJson(res, 200, {
+              ok: true,
+              slug,
+              syncResult: syncRes,
+              shopifyInvoice: client.onboarding.shopifyInvoice,
+              client: sanitizeClientForResponse(client),
+            });
+            return;
+          }
+
+          if (method === 'POST' && subAction === 'send-welcome') {
+            const { data } = await readRequestBody(req);
+            if (data.headline !== undefined || data.introNote !== undefined) {
+              client.onboarding = mergeOnboardingUpdates(
+                client.onboarding,
+                {
+                  welcome: {
+                    ...(data.headline !== undefined ? { headline: String(data.headline).trim() } : {}),
+                    ...(data.introNote !== undefined ? { introNote: String(data.introNote).trim() } : {}),
+                  },
+                },
+                client
+              );
+            }
+            const targetEmail = String(data.to || client.email || '').trim();
+            if (!targetEmail) {
+              sendJson(res, 400, { ok: false, error: 'Client email is required to send welcome email' });
+              return;
+            }
+            const { portalUrl, portalMagicUrl } = buildClientPortalUrls(slug, client.accessCode);
+            const mailPayload = buildFirstHourWelcomeEmail({
+              client,
+              portalUrl: client.onboarding.portalUrl || portalUrl,
+              portalMagicUrl,
+            });
+            const welcomeEmail = await dispatchOnboardingEmail(
+              {
+                to: targetEmail,
+                ...mailPayload,
+                dryRun: Boolean(data.dryRun),
+              },
+              { env, fetchImpl, smtpSendImpl }
+            );
+            if (!welcomeEmail.ok) {
+              sendJson(res, welcomeEmail.statusCode || 502, {
+                ok: false,
+                mode: welcomeEmail.mode || 'email_error',
+                error: welcomeEmail.error || 'Failed to send welcome email',
+                welcomeEmail,
+              });
+              return;
+            }
+            const nowIso = new Date().toISOString();
+            client.onboarding.welcome.sentAt = nowIso;
+            client.onboarding.welcome.lastEmailMode = welcomeEmail.mode;
+            if (client.onboarding.agreement.status === 'draft') {
+              client.onboarding.agreement.status = 'sent';
+            }
+            await saveStore(storePath, store, env);
+            sendJson(res, 200, {
+              ok: true,
+              slug,
+              portalMagicUrl,
+              portalUrl: client.onboarding.portalUrl || portalUrl,
+              welcomeEmail,
+              client: sanitizeClientForResponse(client),
+            });
+            return;
+          }
+        }
+
         const adminClientMatch = pathname.match(/^\/api\/admin\/clients\/([a-z0-9-]+)$/i);
         if (adminClientMatch) {
           const slug = adminClientMatch[1];
@@ -6365,12 +7807,16 @@ function createServer(options = {}) {
             }
             const { data } = await readRequestBody(req);
             const preservedStripe = mergePreservedStripeConfig(store.clients[slug].stripeConfig, data.stripeConfig);
-            store.clients[slug] = {
+            const updatedClient = {
               ...store.clients[slug],
               ...data,
               slug,
               ...(preservedStripe ? { stripeConfig: preservedStripe } : {}),
             };
+            updatedClient.onboarding = data.onboarding
+              ? mergeOnboardingUpdates(store.clients[slug].onboarding, data.onboarding, updatedClient)
+              : normalizeOnboarding(store.clients[slug].onboarding, updatedClient);
+            store.clients[slug] = updatedClient;
             await saveStore(storePath, store, env);
             sendJson(res, 200, { ok: true, slug, client: sanitizeClientForResponse(store.clients[slug]) });
             return;
@@ -6399,6 +7845,7 @@ function createServer(options = {}) {
         }
 
         if (method === 'GET' && (subRoute === '' || subRoute === 'sync')) {
+          client.onboarding = normalizeOnboarding(client.onboarding, client);
           sendJson(res, 200, { ok: true, slug, role: auth.role, client: sanitizeClientForResponse(client), updatedAt: store.updatedAt });
           return;
         }
@@ -6408,13 +7855,19 @@ function createServer(options = {}) {
           const incoming = data.client && typeof data.client === 'object' ? data.client : data;
           const preservedCode = client.accessCode;
           const preservedStripe = mergePreservedStripeConfig(client.stripeConfig, incoming.stripeConfig);
-          store.clients[slug] = {
+          const mergedClient = {
             ...client,
             ...incoming,
             slug,
             accessCode: auth.role === 'admin' && incoming.accessCode ? incoming.accessCode : preservedCode,
             ...(preservedStripe ? { stripeConfig: preservedStripe } : {}),
           };
+          if (auth.role === 'admin' && incoming.onboarding && typeof incoming.onboarding === 'object') {
+            mergedClient.onboarding = mergeOnboardingUpdates(client.onboarding, incoming.onboarding, mergedClient);
+          } else {
+            mergedClient.onboarding = normalizeOnboarding(client.onboarding, mergedClient);
+          }
+          store.clients[slug] = mergedClient;
           await saveStore(storePath, store, env);
           sendJson(res, 200, { ok: true, slug, client: sanitizeClientForResponse(store.clients[slug]), updatedAt: store.updatedAt });
           return;
@@ -6601,6 +8054,261 @@ function createServer(options = {}) {
           return;
         }
 
+        if (method === 'POST' && subRoute === 'onboarding/sign-agreement') {
+          const { data } = await readRequestBody(req);
+          const signerName = String(data.signerName || '').trim();
+          if (!signerName || data.accepted !== true) {
+            sendJson(res, 400, {
+              ok: false,
+              error: 'Non-empty signerName and accepted === true are required to sign the agreement.',
+            });
+            return;
+          }
+
+          client.onboarding = normalizeOnboarding(client.onboarding, client);
+          const ob = client.onboarding;
+          const signedAt = new Date().toISOString();
+          const signerTitle = String(data.signerTitle || ob.agreement.signerTitle || '').trim();
+          const signerEmail = String(data.signerEmail || ob.agreement.signerEmail || client.email || '').trim();
+          const signerIp = getClientIp(req);
+          const userAgent = String(req.headers['user-agent'] || '').slice(0, 300);
+
+          const canonicalAgreement = JSON.stringify({
+            agreementId: ob.agreement.agreementId,
+            version: ob.agreement.version,
+            slug,
+            business: client.business,
+            scopeSummary: ob.agreement.scopeSummary,
+            deliverables: ob.agreement.deliverables,
+            timelineText: ob.agreement.timelineText,
+            paymentTerms: ob.agreement.paymentTerms,
+            ownershipClause: ob.agreement.ownershipClause,
+            setupUsd: ob.shopifyInvoice.setupUsd,
+            monthlyUsd: ob.shopifyInvoice.monthlyUsd,
+            totalUsd: ob.shopifyInvoice.totalUsd,
+            signedAt,
+            signerName,
+            signerTitle,
+            signerEmail,
+          });
+          const agreementHash = crypto.createHash('sha256').update(canonicalAgreement).digest('hex');
+
+          ob.agreement = {
+            ...ob.agreement,
+            status: 'signed',
+            signerName,
+            signerTitle,
+            signerEmail,
+            signedAt,
+            signerIp,
+            userAgent,
+            agreementHash,
+          };
+
+          markOnboardingMilestoneDone(
+            ob,
+            { id: 'ms_p1_agreement', titlePattern: /agreement/i },
+            signedAt
+          );
+
+          const recipient = signerEmail || client.email || OFFICIAL_SUPPORT_EMAIL;
+          const confirmSubject = stripFancyDashes(
+            `Signed Client Agreement Confirmed: ${client.business} (${ob.agreement.agreementId})`
+          );
+          const confirmText = stripFancyDashes(
+            [
+              `Hi ${signerName},`,
+              '',
+              `Your Client Agreement for ${client.business} is electronically signed and verified.`,
+              `Agreement ID: ${ob.agreement.agreementId}`,
+              `Signer: ${signerName}${signerTitle ? ` (${signerTitle})` : ''}`,
+              `Signed At: ${signedAt}`,
+              `SHA-256 Fingerprint: ${agreementHash}`,
+              `Project HQ Portal: ${ob.portalUrl}`,
+              '',
+              `Questions? Reach Rivvak Media at ${OFFICIAL_SUPPORT_EMAIL} or ${OFFICIAL_SUPPORT_PHONE}.`,
+            ].join('\n')
+          );
+
+          const emailConfirmation = await dispatchOnboardingEmail(
+            {
+              to: recipient,
+              subject: confirmSubject,
+              text: confirmText,
+              dryRun: Boolean(data.dryRun),
+            },
+            { env, fetchImpl, smtpSendImpl }
+          );
+
+          await saveStore(storePath, store, env);
+          sendJson(res, 200, {
+            ok: true,
+            slug,
+            agreement: ob.agreement,
+            emailConfirmation,
+            client: sanitizeClientForResponse(client),
+          });
+          return;
+        }
+
+        if (method === 'POST' && subRoute === 'onboarding/schedule-call') {
+          const { data } = await readRequestBody(req);
+          const rawIso = String(data.scheduledIso || '').trim();
+          const parsedMs = rawIso ? Date.parse(rawIso) : NaN;
+          if (!rawIso || !Number.isFinite(parsedMs)) {
+            sendJson(res, 400, { ok: false, error: 'A valid scheduledIso datetime is required.' });
+            return;
+          }
+          const platform = data.platform ? String(data.platform).trim() : 'Google Meet';
+          if (!VALID_CALL_PLATFORMS.has(platform)) {
+            sendJson(res, 400, {
+              ok: false,
+              error: 'Invalid platform. Allowed values: Google Meet, Zoom, Phone Call',
+            });
+            return;
+          }
+
+          client.onboarding = normalizeOnboarding(client.onboarding, client);
+          const ob = client.onboarding;
+          const bookedAt = new Date().toISOString();
+          const normalizedIso = new Date(parsedMs).toISOString();
+          const timezone = String(data.timezone || ob.strategyCall.timezone || 'America/New_York').trim();
+          const durationMin = Number(data.durationMin || ob.strategyCall.durationMin || 30) || 30;
+          const notes = String(data.notes ?? '').trim().slice(0, 2000);
+          const meetingUrl = String(data.meetingUrl || ob.strategyCall.meetingUrl || '').trim();
+
+          ob.strategyCall = {
+            ...ob.strategyCall,
+            status: 'scheduled',
+            scheduledIso: normalizedIso,
+            timezone,
+            durationMin,
+            platform,
+            meetingUrl,
+            notes,
+            bookedAt,
+          };
+
+          if (!Array.isArray(client.bookings)) client.bookings = [];
+          const bookingEntry = {
+            id: `bk_call_${crypto.randomUUID().slice(0, 8)}`,
+            leadName: String(data.contactName || client.owner || client.business || slug).trim(),
+            phone: String(data.phone || client.phone || '').trim(),
+            email: String(data.email || client.email || '').trim(),
+            sessionType: `Kickoff Strategy Call (${platform})`,
+            staff: 'Rivvak Media Strategy Team',
+            scheduledAt: normalizedIso,
+            status: 'Confirmed',
+            notes: notes || `${platform} (${timezone})`,
+          };
+          client.bookings.push(bookingEntry);
+
+          markOnboardingMilestoneDone(
+            ob,
+            { id: 'ms_p1_call', titlePattern: /strategy\s*call/i },
+            bookedAt
+          );
+
+          const recipient = String(data.email || client.email || OFFICIAL_SUPPORT_EMAIL).trim();
+          const confirmSubject = stripFancyDashes(`Kickoff Strategy Call Scheduled: ${client.business}`);
+          const confirmText = stripFancyDashes(
+            [
+              `Hi ${client.owner || client.business || 'there'},`,
+              '',
+              `Your 30 minute Kickoff Strategy Call with Rivvak Media is confirmed.`,
+              `Date & Time: ${normalizedIso} (${timezone})`,
+              `Platform: ${platform}`,
+              ...(meetingUrl ? [`Meeting Link: ${meetingUrl}`] : []),
+              ...(notes ? [`Notes: ${notes}`] : []),
+              `Project HQ Portal: ${ob.portalUrl}`,
+              '',
+              `Support: ${OFFICIAL_SUPPORT_EMAIL} | ${OFFICIAL_SUPPORT_PHONE}`,
+            ].join('\n')
+          );
+
+          const emailConfirmation = await dispatchOnboardingEmail(
+            {
+              to: recipient,
+              subject: confirmSubject,
+              text: confirmText,
+              dryRun: Boolean(data.dryRun),
+            },
+            { env, fetchImpl, smtpSendImpl }
+          );
+
+          await saveStore(storePath, store, env);
+          sendJson(res, 200, {
+            ok: true,
+            slug,
+            strategyCall: ob.strategyCall,
+            booking: bookingEntry,
+            emailConfirmation,
+            client: sanitizeClientForResponse(client),
+          });
+          return;
+        }
+
+        if (method === 'POST' && subRoute === 'onboarding/assets') {
+          const { data } = await readRequestBody(req);
+          client.onboarding = normalizeOnboarding(client.onboarding, client);
+          const ob = client.onboarding;
+          const nowIso = new Date().toISOString();
+
+          const rawUrl = String(data.url || '').trim();
+          const rawLabel = String(data.label || data.title || '').trim();
+          const rawCategory = String(data.category || 'asset').trim().toLowerCase();
+          const rawNote = String(data.note ?? data.text ?? data.clientNote ?? '').trim().slice(0, 2000);
+
+          if (rawUrl && !/^(https?:\/\/|\/)/i.test(rawUrl)) {
+            sendJson(res, 400, { ok: false, error: 'Deliverable URL must start with https://, http://, or /' });
+            return;
+          }
+          if (!rawUrl && !rawNote) {
+            sendJson(res, 400, { ok: false, error: 'Provide a deliverable url/label or a project note.' });
+            return;
+          }
+
+          if (rawUrl) {
+            const category = VALID_DELIVERABLE_CATEGORIES.has(rawCategory) ? rawCategory : 'asset';
+            ob.deliverables.push({
+              id: `del_${crypto.randomUUID().slice(0, 8)}`,
+              label: rawLabel || rawUrl,
+              url: rawUrl,
+              category,
+              addedBy: auth.role === 'admin' ? (data.addedBy === 'client' ? 'client' : 'agency') : 'client',
+              addedAt: nowIso,
+            });
+            const assetRow = ob.milestones.find(
+              (m) => m.id === 'ms_p1_assets' || /brand\s*assets/i.test(String(m.title || ''))
+            );
+            if (assetRow && assetRow.discovery === 'Waiting') {
+              assetRow.discovery = 'In Progress';
+              assetRow.updatedAt = nowIso;
+            }
+          }
+
+          if (rawNote) {
+            ob.clientNotes.push({
+              id: `note_${crypto.randomUUID().slice(0, 8)}`,
+              author: String(
+                data.author || (auth.role === 'admin' ? 'Rivvak Media' : client.owner || client.business || 'Client')
+              ).trim(),
+              text: rawNote,
+              createdAt: nowIso,
+            });
+          }
+
+          await saveStore(storePath, store, env);
+          sendJson(res, 200, {
+            ok: true,
+            slug,
+            deliverables: ob.deliverables,
+            clientNotes: ob.clientNotes,
+            client: sanitizeClientForResponse(client),
+          });
+          return;
+        }
+
         sendJson(res, 404, { error: 'Client endpoint not found' });
         return;
       }
@@ -6729,6 +8437,11 @@ module.exports = {
   buildIntegrationsStatus,
   aggregateShopifyFinances,
   fetchLiveShopifyFinances,
+  createShopifyDraftOrderInvoice,
+  fetchShopifyDraftOrderStatus,
+  createDefaultOnboarding,
+  normalizeOnboarding,
+  mergeOnboardingUpdates,
   recordAnalyticsEvent,
   aggregateFirstPartyAnalytics,
   buildAnalyticsOverview,
