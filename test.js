@@ -1942,7 +1942,7 @@ async function runTests() {
         );
         assert.strictEqual(defOb.welcome.whatHappensNext.length, 5);
         assert.strictEqual(defOb.welcome.supportEmail, 'connect@rivvak.com');
-        assert.strictEqual(defOb.welcome.supportPhone, '(728) 231-6974');
+        assert.strictEqual(defOb.welcome.supportPhone, '(561) 645-0618');
         assert.strictEqual(defOb.shopifyInvoice.totalUsd, 1900);
         assert.ok(defOb.milestones.some((m) => m.title === 'Send & Sign Client Agreement'));
         assert.ok(defOb.milestones.some((m) => m.title === 'Schedule Kickoff Strategy Call'));
@@ -2078,7 +2078,7 @@ async function runTests() {
           const sentText = capturedEmails[0].text;
           assert.ok(sentText.includes(liveOnboard.data.portalMagicUrl));
           assert.ok(sentText.includes('connect@rivvak.com'));
-          assert.ok(sentText.includes('(728) 231-6974'));
+          assert.ok(sentText.includes('(561) 645-0618'));
           assert.ok(!sentText.includes('\u2014'), 'Welcome email must contain zero em-dashes');
           assert.ok(!sentText.includes('\u2013'), 'Welcome email must contain zero en-dashes');
           assert.ok(!sentText.includes('Jh22mp21??.'), 'Welcome email must never leak admin passcode');

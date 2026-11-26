@@ -1090,7 +1090,7 @@ function createDefaultStore(env = process.env) {
 }
 
 const OFFICIAL_SUPPORT_EMAIL = 'connect@rivvak.com';
-const OFFICIAL_SUPPORT_PHONE = '(728) 231-6974';
+const OFFICIAL_SUPPORT_PHONE = '(561) 645-0618';
 const VALID_AGREEMENT_STATUSES = new Set(['draft', 'sent', 'signed']);
 const VALID_INVOICE_STATUSES = new Set(['not_created', 'open', 'invoice_sent', 'paid']);
 const VALID_CALL_STATUSES = new Set(['unscheduled', 'scheduled', 'completed']);
@@ -5232,7 +5232,7 @@ function stripFancyDashes(text) {
 
 /**
  * Build First-Hour Welcome + Agreement + Shopify Checkout + Portal Magic Link email payload.
- * Uses official Rivvak Media contact details ONLY (connect@rivvak.com and (728) 231-6974).
+ * Uses official Rivvak Media contact details ONLY (connect@rivvak.com and (561) 645-0618).
  * @param {{ client: object, portalUrl: string, portalMagicUrl: string }} params
  * @returns {{ subject: string, text: string, html: string }}
  */
